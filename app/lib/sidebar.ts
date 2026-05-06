@@ -17,6 +17,28 @@ export type ThreadGroup<T> = {
   mostRecentMs: number;
 };
 
+export type LimitedThreadGroup<T> = ThreadGroup<T> & {
+  visible: T[];
+  hiddenCount: number;
+};
+
+// Per-project sidebar limit. iOS shows everything in a scrolling list, but on
+// a phone we want to keep the drawer skimmable — pick the N most-recent threads
+// per project and stash the rest behind a "Show all (M)" toggle.
+export function applyGroupLimit<T>(
+  groups: ThreadGroup<T>[],
+  limit: number,
+  expandedKeys: ReadonlySet<string> = new Set(),
+): LimitedThreadGroup<T>[] {
+  const safe = Math.max(0, Math.floor(limit));
+  return groups.map((g) => {
+    const expanded = expandedKeys.has(g.key);
+    const visible = expanded || g.threads.length <= safe ? g.threads : g.threads.slice(0, safe);
+    const hiddenCount = expanded ? 0 : Math.max(0, g.threads.length - visible.length);
+    return { ...g, visible, hiddenCount };
+  });
+}
+
 // Groups by the cwd path (one section per project), like iOS does.
 // Threads without a cwd land in an "Other" group.
 export function groupThreadsByProject<T extends ThreadLike>(threads: T[]): ThreadGroup<T>[] {

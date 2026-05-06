@@ -46,7 +46,7 @@ import {
   SecureSession,
 } from '@/lib/protocol/secureTransport';
 import { resolveTrustedSession } from '@/lib/protocol/trustedSessionResolve';
-import { groupThreadsByProject, relativeTime, statusColor } from '@/lib/sidebar';
+import { applyGroupLimit, groupThreadsByProject, relativeTime, statusColor } from '@/lib/sidebar';
 import { pendingPairing } from '@/lib/state/pendingPairing';
 import {
   clearSavedPairing,
@@ -60,6 +60,11 @@ import { colors, fontSize, radius, spacing, weight } from '@/lib/theme/tokens';
 import { extractThreads, extractTurnMeta, extractTurns, ThreadRow, TurnMeta, TurnRow } from '@/lib/protocol/extract';
 import { formatDuration } from '@/lib/format';
 import { IntermediateBlock, TurnDisplay, buildTurnDisplays } from '@/lib/turn-display';
+
+// How many threads each project section shows by default in the sidebar drawer.
+// Tap "Show all (N)" on a section to reveal the rest. Mirrors the leaner
+// Linear/Slack-style sidebar UX rather than iOS Codex's flat dump.
+const SIDEBAR_THREADS_PER_GROUP = 5;
 
 type Status =
   | { kind: 'loading' }
@@ -851,6 +856,13 @@ function SidebarDrawer({
   const drawerWidth = Math.min(360, Math.round(screenW * 0.82));
   const slide = useRef(new Animated.Value(visible ? 0 : -drawerWidth)).current;
   const backdropOpacity = useRef(new Animated.Value(visible ? 1 : 0)).current;
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set());
+  const toggleGroup = (key: string) =>
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
 
   useEffect(() => {
     Animated.parallel([
@@ -898,11 +910,13 @@ function SidebarDrawer({
           </View>
         ) : (
           <SectionList
-            sections={groupThreadsByProject(threads).map((g) => ({
+            sections={applyGroupLimit(groupThreadsByProject(threads), SIDEBAR_THREADS_PER_GROUP, expandedGroups).map((g) => ({
               key: g.key,
               label: g.label,
               fullPath: g.fullPath,
-              data: g.threads,
+              hiddenCount: g.hiddenCount,
+              totalCount: g.threads.length,
+              data: g.visible,
             }))}
             keyExtractor={(t, i) => t.id || `thread-${i}`}
             stickySectionHeadersEnabled={false}
@@ -912,10 +926,23 @@ function SidebarDrawer({
                   {section.label}
                 </Text>
                 <Text style={styles.projectSectionCount}>
-                  {section.data.length}
+                  {section.totalCount}
                 </Text>
               </View>
             )}
+            renderSectionFooter={({ section }) =>
+              section.hiddenCount > 0 || (expandedGroups.has(section.key) && section.totalCount > SIDEBAR_THREADS_PER_GROUP) ? (
+                <Pressable
+                  onPress={() => toggleGroup(section.key)}
+                  style={({ pressed }) => [styles.showMoreRow, pressed && { opacity: 0.6 }]}>
+                  <Text style={styles.showMoreText}>
+                    {expandedGroups.has(section.key)
+                      ? 'Show less'
+                      : `Show all (${section.totalCount})`}
+                  </Text>
+                </Pressable>
+              ) : null
+            }
             renderItem={({ item }) => (
               <Pressable
                 onPress={() => onSelect(item)}
@@ -1549,6 +1576,16 @@ const styles = StyleSheet.create({
     height: StyleSheet.hairlineWidth,
     backgroundColor: colors.fg10,
     marginLeft: 24, // align with title (skip the dot slot)
+  },
+  showMoreRow: {
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    marginLeft: 24,
+  },
+  showMoreText: {
+    color: colors.plan,
+    fontSize: fontSize.footnote,
+    fontWeight: weight.regular,
   },
   threadDotSlot: { width: 16, alignItems: 'center', justifyContent: 'center' },
   threadDot: { width: 8, height: 8, borderRadius: 4 },

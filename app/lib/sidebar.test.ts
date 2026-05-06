@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { groupThreadsByProject, relativeTime, statusColor } from './sidebar';
+import { applyGroupLimit, groupThreadsByProject, relativeTime, statusColor } from './sidebar';
 
 describe('groupThreadsByProject', () => {
   it('groups threads by their cwd path with basename labels', () => {
@@ -69,6 +69,60 @@ describe('relativeTime', () => {
   });
   it('returns empty string for missing input', () => {
     expect(relativeTime(undefined, now)).toBe('');
+  });
+});
+
+describe('applyGroupLimit', () => {
+  const groups = groupThreadsByProject([
+    { id: 'a1', cwd: '/p/alpha', updatedAt: 100 },
+    { id: 'a2', cwd: '/p/alpha', updatedAt: 200 },
+    { id: 'a3', cwd: '/p/alpha', updatedAt: 300 },
+    { id: 'a4', cwd: '/p/alpha', updatedAt: 400 },
+    { id: 'a5', cwd: '/p/alpha', updatedAt: 500 },
+    { id: 'a6', cwd: '/p/alpha', updatedAt: 600 },
+    { id: 'a7', cwd: '/p/alpha', updatedAt: 700 },
+    { id: 'b1', cwd: '/p/beta', updatedAt: 100 },
+    { id: 'b2', cwd: '/p/beta', updatedAt: 200 },
+  ]);
+
+  it('caps each group to the limit and reports hiddenCount', () => {
+    const out = applyGroupLimit(groups, 5);
+    const alpha = out.find((g) => g.label === 'alpha')!;
+    const beta = out.find((g) => g.label === 'beta')!;
+    expect(alpha.visible).toHaveLength(5);
+    expect(alpha.hiddenCount).toBe(2);
+    expect(beta.visible).toHaveLength(2);
+    expect(beta.hiddenCount).toBe(0);
+  });
+
+  it('keeps the most-recent threads in the visible slice', () => {
+    const out = applyGroupLimit(groups, 5);
+    const alpha = out.find((g) => g.label === 'alpha')!;
+    expect(alpha.visible.map((t) => t.id)).toEqual(['a7', 'a6', 'a5', 'a4', 'a3']);
+  });
+
+  it('reveals everything when the group key is in expandedKeys', () => {
+    const out = applyGroupLimit(groups, 5, new Set([groups[0].key]));
+    const alpha = out.find((g) => g.label === 'alpha')!;
+    expect(alpha.visible).toHaveLength(7);
+    expect(alpha.hiddenCount).toBe(0);
+  });
+
+  it('treats limit=0 as "show none until expanded"', () => {
+    const out = applyGroupLimit(groups, 0);
+    const alpha = out.find((g) => g.label === 'alpha')!;
+    expect(alpha.visible).toHaveLength(0);
+    expect(alpha.hiddenCount).toBe(7);
+  });
+
+  it('preserves the original group ordering and metadata', () => {
+    const out = applyGroupLimit(groups, 5);
+    expect(out.map((g) => g.label)).toEqual(groups.map((g) => g.label));
+    for (let i = 0; i < out.length; i++) {
+      expect(out[i].key).toBe(groups[i].key);
+      expect(out[i].fullPath).toBe(groups[i].fullPath);
+      expect(out[i].threads).toBe(groups[i].threads);
+    }
   });
 });
 
