@@ -718,6 +718,10 @@ export default function PairScreen() {
   }
 
   function handleNotification(method: string, params: unknown) {
+    if (__DEV__ && (method.startsWith('turn/') || method.startsWith('item/') || method.startsWith('codex/event'))) {
+      const p = params && typeof params === 'object' ? params as Record<string, unknown> : {};
+      console.log('[remodex/notif]', method, 'keys=', Object.keys(p));
+    }
     setStatus((prev) => {
       if (prev.kind !== 'thread-ready') return prev;
       const p = (params && typeof params === 'object' ? (params as Record<string, unknown>) : {}) as Record<string, unknown>;
@@ -839,14 +843,18 @@ export default function PairScreen() {
       }
     }
 
-    // Mirrors iOS buildTurnStartRequestParams — top-level model/effort/
-    // serviceTier are kept "legacy" alongside collaborationMode but the bridge
-    // still honors them, and we don't send collaborationMode yet (plan mode is
-    // visible-only until the developer-instructions payload is wired).
+    // Mirrors iOS buildTurnStartRequestParams + sendRequestWithSandboxFallback.
+    // The bridge silently no-ops the turn if `sandboxPolicy` + `approvalPolicy`
+    // aren't present — Codex CLI requires them before actually starting a
+    // turn, even though the JSON-RPC layer returns ok=true. We default to the
+    // onRequest / workspaceWrite combo iOS uses (mirrors the "default" access
+    // mode there).
     const buildParams = (imageURLKey: 'url' | 'image_url'): Record<string, unknown> => {
       const params: Record<string, unknown> = {
         threadId: cur.thread.id,
         input: buildTurnInput({ text, attachments: encodedAttachments, imageURLKey }),
+        sandboxPolicy: { type: 'workspaceWrite', networkAccess: true },
+        approvalPolicy: 'onRequest',
       };
       const sel = cur.selection;
       const selectedModel = selectedModelOption(availableModels, sel);
@@ -859,6 +867,11 @@ export default function PairScreen() {
     };
 
     let resp = await client.sendRequest('turn/start', buildParams('url'));
+    if (__DEV__) {
+      console.log('[remodex/turn-start] resp.ok=', resp.ok,
+        resp.ok ? 'result-keys=' : 'error=',
+        resp.ok ? Object.keys((resp.result as object) ?? {}) : resp.error);
+    }
     // Retry with `image_url` key if the bridge complains about that field
     // (older bridges expect the legacy key — mirrors iOS retry path).
     if (!resp.ok && encodedAttachments.length > 0 && shouldRetryWithImageURLKey(resp.error.message)) {
@@ -867,6 +880,18 @@ export default function PairScreen() {
 
     if (resp.ok) {
       void refreshContextUsage(cur.thread.id);
+      // Safety net: if no turn/started notification arrives within 12s, clear
+      // isSending so the UI isn't stuck on "Working…" forever. Real turns get
+      // their flag cleared via turn/completed in handleNotification.
+      const startedThreadId = cur.thread.id;
+      setTimeout(() => {
+        setStatus((prev) => {
+          if (prev.kind !== 'thread-ready' || prev.thread.id !== startedThreadId) return prev;
+          if (!prev.isSending || prev.activeTurnId) return prev;
+          if (__DEV__) console.warn('[remodex/turn-start] no turn/started notification within 12s; clearing isSending.');
+          return { ...prev, isSending: false };
+        });
+      }, 12_000);
     }
 
     if (!resp.ok) {
