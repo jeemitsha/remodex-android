@@ -30,3 +30,5 @@ yarn-error.*
 .env
 .env.local
 *.pem
+**/pairing.json
+**/__fixtures__/*.response.json

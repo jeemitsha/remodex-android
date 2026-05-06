@@ -8,7 +8,11 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "capture": "tsx scripts/capture-fixtures.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",
@@ -48,9 +52,13 @@
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
+    "@types/ws": "^8.18.1",
     "eslint": "^9.25.0",
     "eslint-config-expo": "~10.0.0",
-    "typescript": "~5.9.2"
+    "tsx": "^4.21.0",
+    "typescript": "~5.9.2",
+    "vitest": "^3.2.4",
+    "ws": "^8.20.0"
   },
   "private": true
 }
