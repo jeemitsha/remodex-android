@@ -491,7 +491,22 @@ export default function PairScreen() {
     const client = clientRef.current;
     if (!client) return;
     const cur = status;
-    if (cur.kind !== 'sessions-ready') return;
+    // Accept opens from any post-pair state — the user may switch from one
+    // open thread (`thread-ready`) to another, retry from `thread-error`,
+    // or jump in mid-load from `thread-loading`. Earlier we only allowed
+    // `sessions-ready` and silently dropped the click in every other case.
+    const switchable =
+      cur.kind === 'sessions-ready'
+      || cur.kind === 'thread-loading'
+      || cur.kind === 'thread-ready'
+      || cur.kind === 'thread-error';
+    if (!switchable) return;
+    // Same thread tapped — just make sure the sidebar closes.
+    if ((cur.kind === 'thread-loading' || cur.kind === 'thread-ready' || cur.kind === 'thread-error')
+        && cur.thread.id === thread.id) {
+      setSidebarOpen(false);
+      return;
+    }
 
     setSidebarOpen(false);
     setStatus({
