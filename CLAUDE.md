@@ -11,7 +11,8 @@ Clean-room **Android (Expo + RN + TypeScript)** client for the [Remodex](https:/
 1. **[`Docs/STATE.md`](Docs/STATE.md)** — current status, what works, what's broken, what's next, where we left off. **Update this file as you go.** This is the source of truth for "what's the project doing right now."
 2. **[`Docs/PROTOCOL.md`](Docs/PROTOCOL.md)** — reverse-engineered wire-format spec for the Remodex bridge protocol (handshake, envelope, JSON-RPC methods).
 3. **[`AGENTS.md`](AGENTS.md)** — hard rules: git identity (jeemitsha), no modifying the upstream clone, etc.
-4. **[`README.md`](README.md)** — public-facing project description.
+4. **[`Docs/EAS.md`](Docs/EAS.md)** — EAS dev build runbook (read when Expo Go stops being enough).
+5. **[`README.md`](README.md)** — public-facing project description.
 
 ## Hard rules (don't violate)
 

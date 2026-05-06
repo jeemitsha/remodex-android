@@ -47,7 +47,15 @@
           }
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-audio",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Remodex needs photo access to attach images to your prompts.",
+          "cameraPermission": "Remodex needs camera access to take photos for your prompts."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

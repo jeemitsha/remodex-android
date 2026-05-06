@@ -17,6 +17,39 @@ Build a **production-quality, polished, third-party Android client** for the Rem
 
 ## Where we left off (most recent → oldest)
 
+### 2026-05-06 — late night — model picker, context ring, image upload, voice, capture-cache, EAS docs
+
+**Commits in this checkpoint** (newest first):
+- `<latest>` EAS dev-build docs + eas.json + image-picker permissions in app.json
+- `c765965` capture script remembers identity → second run uses trusted_session_resolve, no QR
+- `8341fff` voice transcription via expo-audio + voice/resolveAuth + chatgpt.com/backend-api/transcribe; context pill is now a clean SVG progress ring (react-native-svg)
+- `616e947` image attachments end-to-end (expo-file-system base64 → data URL → input[].image_url with `url`/`image_url` retry); also fixes session-list stall (model/list runs fire-and-forget) + pins active thread in sidebar so it never hides behind "Show all"
+- `1797211` context-window pill via thread/contextWindow/read with token-count tolerance + tap-for-detail panel
+- `b0446a7` real model picker driven by model/list — hierarchical sheet (Intelligence + Model + Speed) mirroring iOS ComposerRuntimeMenuControl, bolt icon when fast mode is on, sends model+effort+serviceTier with turn/start
+
+**Wired and working** (validated logic + UI; phone-test blockers noted inline):
+- Model picker (Intelligence / Model / Speed) — opens iOS-style hierarchical sheet, persists per-thread selection
+- Context-window ring — color shifts green/amber/red, tap opens detail with raw token counts
+- Image attachments — pick from library or camera, multi-select up to 8, base64-encoded into `input[].image_url`-or-`url` data URLs, retries on legacy bridges
+- Voice mic — expo-audio HIGH_QUALITY (m4a) recording with timer + Stop/Cancel, two-step auth (`voice/resolveAuth` → POST chatgpt.com/backend-api/transcribe), text injected into composer
+- Capture identity cache — first run uses pairing.json + writes cache; subsequent runs trustedSessionResolve to skip QR; `REMODEX_CAPTURE_RESET=1` wipes
+- EAS dev-build runbook in Docs/EAS.md + eas.json with development/preview/production profiles
+
+**Stubbed / deferred (with reason)**:
+- **Component snapshot tests**: deliberately deferred. Vitest (node env) + RN component rendering needs jsdom + RN module mocks + JSX transforms — half-day of config wrangling. Our parser layer (where silent regressions happen — see the original "raw JSON in chat" bug) is fully fixture-tested. Visual regressions are loud (reload Expo Go, look). Revisit when we move to EAS dev build because we'll likely add jest-expo for native-module tests anyway.
+- **Plan-mode JSON-RPC payload**: `planArmed` UI state is real but turn/start params don't yet send `collaborationMode: { mode: "plan", settings: ... }`. Need to mirror iOS `buildCollaborationModePayload` + a developer-instructions reference text.
+- **m4a vs WAV for voice transcription**: Android records m4a, iOS records WAV. Whisper accepts both, so we send `audio/m4a`. If a future bridge build rejects the format we'll add a converter (or switch to PCM via lower-level recorder options).
+- **Live model-picker / context-pill updates while a turn streams**: model picker is fetched once at session-load; context pill refreshes after each `turn/start` success. Should be event-driven once we capture a `context/usage/updated`-like notification.
+
+**Test infra status**: 12 test files, **149** unit + fixture tests, all green in ~370ms. New: runtime (21), contextWindow (15), attachments (12), voice (14).
+
+**Next chunks** (in order):
+1. **Plan-mode collaborationMode payload** — wire iOS `buildCollaborationModePayload` so `planArmed` actually changes how the bridge runs the turn.
+2. **Streaming events** — subscribe to bridge notifications so the chat updates live (instead of refetching `thread/turns/list` per send). Includes live `Worked for` wrapper that grows tool calls as they happen.
+3. **Real-bridge captures** for runtime + contextWindow — replace the synthetic model-list fixture with a captured one to confirm the parser handles whatever spelling this bridge ships.
+4. **EAS dev build (actual run)** — produce an APK so we can drop Expo Go and unblock react-native-quick-crypto / better audio modules.
+5. **Component snapshot tests** (after EAS migration to jest-expo).
+
 ### 2026-05-06 — night — sidebar 5-per-project + iOS-parity composer
 
 **Commits in this checkpoint** (newest first):
@@ -285,3 +318,4 @@ The capture script uses an ephemeral phone identity each run, so it doesn't poll
 - **2026-05-06 evening**: chronological turn order fix; collapsible tool groups (lib/group-turns.ts); welcome+drawer layout pattern; react-native-markdown-display for assistant text; mcpToolCall extraction. Commit `2f063e2`. 57/57 tests.
 - **2026-05-06 late evening**: proper "Worked for X" turn wrapper (`lib/turn-display.ts`); per-turn structure with narration / commands-batch / mcp-pill / steered blocks; no-bubble assistant; uniform user bubble; tight bullet indent; removed top-only-back-arrow bar; wall-clock turn duration via `extractTurnMeta`; precise `Xh Xm Xs` formatter in `lib/format.ts`. 69/69 tests. Awaiting user phone validation.
 - **2026-05-06 night**: sidebar each-project-cap-5 + Show all toggle (`applyGroupLimit` in `lib/sidebar.ts`); iOS-parity composer card with attachments preview, plus-menu (photo library + camera via expo-image-picker, plan-mode toggle), model pill stub, context pill stub, mic stub, arrow-up send. Closes the qrcode-as-send bug. 86/86 tests. Commits `0318188`, `f9d5ead`. Awaiting user phone validation.
+- **2026-05-06 late night**: real model picker (model/list, hierarchical sheet, bolt icon when fast); context-window ring (thread/contextWindow/read, react-native-svg arc); image attachments end-to-end (expo-file-system base64 → input[].image_url with retry); voice transcription (expo-audio + voice/resolveAuth + chatgpt.com transcribe); fixed the model/list bootstrap stall + pinned active thread in sidebar. Capture script identity cache → no-QR refreshes. EAS docs + eas.json. 149/149 tests. Commits `b0446a7`, `1797211`, `616e947`, `8341fff`, `c765965`, plus EAS docs commit.
