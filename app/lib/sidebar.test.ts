@@ -115,6 +115,22 @@ describe('applyGroupLimit', () => {
     expect(alpha.hiddenCount).toBe(7);
   });
 
+  it('pins the active-thread id into visible[] even when older than the top-5', () => {
+    // a1 is the OLDEST in alpha (updatedAt: 100). Without pinning it would be
+    // hidden behind "Show all".
+    const out = applyGroupLimit(groups, 5, new Set(), new Set(['a1']));
+    const alpha = out.find((g) => g.label === 'alpha')!;
+    expect(alpha.visible.map((t) => t.id)).toContain('a1');
+    expect(alpha.visible).toHaveLength(6); // top-5 + pinned
+    expect(alpha.hiddenCount).toBe(1);
+  });
+
+  it('does nothing extra when the pinned id is already in the top-5', () => {
+    const out = applyGroupLimit(groups, 5, new Set(), new Set(['a7']));
+    const alpha = out.find((g) => g.label === 'alpha')!;
+    expect(alpha.visible).toHaveLength(5);
+  });
+
   it('preserves the original group ordering and metadata', () => {
     const out = applyGroupLimit(groups, 5);
     expect(out.map((g) => g.label)).toEqual(groups.map((g) => g.label));

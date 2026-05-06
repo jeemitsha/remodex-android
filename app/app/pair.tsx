@@ -10,6 +10,7 @@
 //
 // After pair: send `initialize`, then `thread/list`, render the result.
 
+import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
@@ -89,6 +90,11 @@ import {
   extractContextWindowUsage,
   fractionUsed,
 } from '@/lib/protocol/contextWindow';
+import {
+  buildTurnInput,
+  encodeAttachmentToDataURL,
+  shouldRetryWithImageURLKey,
+} from '@/lib/protocol/attachments';
 
 // How many threads each project section shows by default in the sidebar drawer.
 // Tap "Show all (N)" on a section to reveal the rest. Mirrors the leaner
@@ -396,23 +402,23 @@ export default function PairScreen() {
         return;
       }
 
-      // 1.5) model/list — runtime models for the picker. Tolerate failure:
-      // older bridges may not expose this method, in which case the picker
-      // falls back to "Default" and we send no model field on turn/start.
-      try {
-        const modelsResp = await client.sendRequest('model/list', {
-          cursor: null,
-          limit: 50,
-          includeHidden: false,
-        });
-        if (modelsResp.ok) {
-          const models = extractModels(modelsResp.result);
-          if (!cancelled) setAvailableModels(models);
+      // 1.5) model/list — fire-and-forget so a slow / unsupported model/list
+      // never blocks the session list from rendering. iOS uses an 8s timeout;
+      // we let sendRequest's default (30s) apply but don't await it here.
+      void (async () => {
+        try {
+          const modelsResp = await client.sendRequest(
+            'model/list',
+            { cursor: null, limit: 50, includeHidden: false },
+            8_000,
+          );
+          if (modelsResp.ok && !cancelled) {
+            setAvailableModels(extractModels(modelsResp.result));
+          }
+        } catch {
+          // Silent: picker stays in "Default" state.
         }
-      } catch {
-        // Silent: picker stays in "Default" state. Future: show toast on first
-        // open of the picker if availableModels is still empty.
-      }
+      })();
 
       // 2) thread/list — paginated; for MVP just grab the first page.
       const listResp = await client.sendRequest('thread/list', { limit: 50 });
@@ -632,7 +638,8 @@ export default function PairScreen() {
     const cur = status;
     if (cur.kind !== 'thread-ready') return;
     const text = cur.composer.trim();
-    if (!text || cur.isSending) return;
+    const hasAttachments = cur.attachments.length > 0;
+    if ((!text && !hasAttachments) || cur.isSending) return;
     const client = clientRef.current;
     if (!client) return;
 
@@ -653,23 +660,60 @@ export default function PairScreen() {
       activeTurnId: null,
     });
 
+    // Encode each attachment to a base64 data URL up front so the rest of the
+    // flow doesn't need to await per-image. expo-file-system.readAsStringAsync
+    // is async but cheap for typical phone-camera sized images.
+    let encodedAttachments: { dataUrl: string }[] = [];
+    if (hasAttachments) {
+      try {
+        encodedAttachments = await Promise.all(
+          cur.attachments.map(async (a) => ({
+            dataUrl: await encodeAttachmentToDataURL(a, async (uri) =>
+              FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 }),
+            ),
+          })),
+        );
+      } catch (err) {
+        const errTurn: TurnRow = {
+          id: `att-err-${Date.now()}`,
+          role: 'system',
+          text: `[attachment encode failed] ${(err as Error)?.message ?? err}`,
+          raw: err,
+        };
+        setStatus((prev) =>
+          prev.kind === 'thread-ready'
+            ? { ...prev, turns: [...prev.turns, errTurn], isSending: false }
+            : prev,
+        );
+        return;
+      }
+    }
+
     // Mirrors iOS buildTurnStartRequestParams — top-level model/effort/
     // serviceTier are kept "legacy" alongside collaborationMode but the bridge
     // still honors them, and we don't send collaborationMode yet (plan mode is
     // visible-only until the developer-instructions payload is wired).
-    const startParams: Record<string, unknown> = {
-      threadId: cur.thread.id,
-      input: [{ type: 'text', text }],
+    const buildParams = (imageURLKey: 'url' | 'image_url'): Record<string, unknown> => {
+      const params: Record<string, unknown> = {
+        threadId: cur.thread.id,
+        input: buildTurnInput({ text, attachments: encodedAttachments, imageURLKey }),
+      };
+      const sel = cur.selection;
+      const selectedModel = selectedModelOption(availableModels, sel);
+      if (selectedModel) params.model = selectedModel.model;
+      const effort = effectiveReasoningEffort(selectedModel, sel);
+      if (effort) params.effort = effort;
+      const tier = normalizeServiceTier(selectedModel, sel.serviceTier);
+      if (tier) params.serviceTier = tier;
+      return params;
     };
-    const sel = cur.selection;
-    const selectedModel = selectedModelOption(availableModels, sel);
-    if (selectedModel) startParams.model = selectedModel.model;
-    const effort = effectiveReasoningEffort(selectedModel, sel);
-    if (effort) startParams.effort = effort;
-    const tier = normalizeServiceTier(selectedModel, sel.serviceTier);
-    if (tier) startParams.serviceTier = tier;
 
-    const resp = await client.sendRequest('turn/start', startParams);
+    let resp = await client.sendRequest('turn/start', buildParams('url'));
+    // Retry with `image_url` key if the bridge complains about that field
+    // (older bridges expect the legacy key — mirrors iOS retry path).
+    if (!resp.ok && encodedAttachments.length > 0 && shouldRetryWithImageURLKey(resp.error.message)) {
+      resp = await client.sendRequest('turn/start', buildParams('image_url'));
+    }
 
     if (resp.ok) {
       void refreshContextUsage(cur.thread.id);
@@ -1036,6 +1080,8 @@ function PrimaryWelcomeBtn({ label, onPress }: { label: string; onPress: () => v
   );
 }
 
+// activeThreadId is also used as a "pinned" id passed into applyGroupLimit so
+// the open thread never falls behind "Show all" if it's older than the top-5.
 function SidebarDrawer({
   visible,
   threads,
@@ -1109,7 +1155,12 @@ function SidebarDrawer({
           </View>
         ) : (
           <SectionList
-            sections={applyGroupLimit(groupThreadsByProject(threads), SIDEBAR_THREADS_PER_GROUP, expandedGroups).map((g) => ({
+            sections={applyGroupLimit(
+              groupThreadsByProject(threads),
+              SIDEBAR_THREADS_PER_GROUP,
+              expandedGroups,
+              activeThreadId ? new Set([activeThreadId]) : undefined,
+            ).map((g) => ({
               key: g.key,
               label: g.label,
               fullPath: g.fullPath,

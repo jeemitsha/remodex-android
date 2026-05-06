@@ -25,17 +25,29 @@ export type LimitedThreadGroup<T> = ThreadGroup<T> & {
 // Per-project sidebar limit. iOS shows everything in a scrolling list, but on
 // a phone we want to keep the drawer skimmable — pick the N most-recent threads
 // per project and stash the rest behind a "Show all (M)" toggle.
-export function applyGroupLimit<T>(
+//
+// `pinnedIds` (typically just the currently-open thread) are always included
+// in `visible[]` regardless of where they fall in the recency order, so the
+// thread the user is reading never disappears behind "Show all".
+export function applyGroupLimit<T extends { id: string }>(
   groups: ThreadGroup<T>[],
   limit: number,
   expandedKeys: ReadonlySet<string> = new Set(),
+  pinnedIds: ReadonlySet<string> = new Set(),
 ): LimitedThreadGroup<T>[] {
   const safe = Math.max(0, Math.floor(limit));
   return groups.map((g) => {
     const expanded = expandedKeys.has(g.key);
-    const visible = expanded || g.threads.length <= safe ? g.threads : g.threads.slice(0, safe);
-    const hiddenCount = expanded ? 0 : Math.max(0, g.threads.length - visible.length);
-    return { ...g, visible, hiddenCount };
+    if (expanded || g.threads.length <= safe) {
+      return { ...g, visible: g.threads, hiddenCount: 0 };
+    }
+    const head = g.threads.slice(0, safe);
+    const tail = g.threads.slice(safe);
+    const pinnedFromTail = pinnedIds.size === 0
+      ? []
+      : tail.filter((t) => pinnedIds.has(t.id));
+    const visible = pinnedFromTail.length === 0 ? head : [...head, ...pinnedFromTail];
+    return { ...g, visible, hiddenCount: g.threads.length - visible.length };
   });
 }
 
