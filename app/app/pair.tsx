@@ -31,7 +31,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Markdown from 'react-native-markdown-display';
 
@@ -1177,6 +1177,7 @@ function Composer({
   onRemoveAttachment: (id: string) => void;
 }) {
   const [plusOpen, setPlusOpen] = useState(false);
+  const insets = useSafeAreaInsets();
   const sendable = isComposerSendable({
     ...INITIAL_COMPOSER_STATE,
     text,
@@ -1185,7 +1186,7 @@ function Composer({
   const sendDisabled = !sendable || isSending;
 
   return (
-    <View style={styles.composerWrap}>
+    <View style={[styles.composerWrap, { paddingBottom: Math.max(insets.bottom, spacing.sm) }]}>
       <View style={styles.composerCard}>
         {attachments.length > 0 ? (
           <ScrollView
