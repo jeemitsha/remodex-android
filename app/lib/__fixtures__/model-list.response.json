@@ -1,0 +1,59 @@
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "result": {
+    "items": [
+      {
+        "id": "gpt-5.5",
+        "model": "gpt-5.5",
+        "displayName": "GPT-5.5",
+        "description": "Most capable. Best for hard problems.",
+        "isDefault": true,
+        "supportsFastMode": true,
+        "supportedReasoningEfforts": [
+          { "reasoningEffort": "low", "description": "Fastest, lighter reasoning." },
+          { "reasoningEffort": "medium", "description": "Balanced default." },
+          { "reasoningEffort": "high", "description": "Deeper reasoning." },
+          { "reasoningEffort": "extra_high", "description": "Slowest, deepest reasoning." }
+        ],
+        "defaultReasoningEffort": "medium"
+      },
+      {
+        "id": "gpt-5.4",
+        "model": "gpt-5.4",
+        "displayName": "GPT-5.4",
+        "description": "Faster general-purpose model.",
+        "isDefault": false,
+        "supportsFastMode": true,
+        "supportedReasoningEfforts": [
+          { "reasoningEffort": "low" },
+          { "reasoningEffort": "medium" },
+          { "reasoningEffort": "high" }
+        ],
+        "defaultReasoningEffort": "medium"
+      },
+      {
+        "id": "gpt-5.4-mini",
+        "model": "gpt-5.4-mini",
+        "displayName": "GPT-5.4 Mini",
+        "description": "Smallest, cheapest, fastest.",
+        "isDefault": false,
+        "supports_fast_mode": true,
+        "supported_reasoning_efforts": [
+          { "reasoning_effort": "low" },
+          { "reasoning_effort": "medium" }
+        ],
+        "default_reasoning_effort": "low"
+      },
+      {
+        "id": "gpt-4o",
+        "model": "gpt-4o",
+        "displayName": "GPT-4o",
+        "description": "Legacy multimodal model.",
+        "isDefault": false,
+        "supportsFastMode": false,
+        "supportedReasoningEfforts": []
+      }
+    ]
+  }
+}

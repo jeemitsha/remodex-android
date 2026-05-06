@@ -32,3 +32,6 @@ yarn-error.*
 *.pem
 **/pairing.json
 **/__fixtures__/*.response.json
+# Synthetic fixtures (no real sessionIds) live in version control so tests
+# work on CI without a live bridge. List them explicitly here.
+!app/lib/__fixtures__/model-list.response.json

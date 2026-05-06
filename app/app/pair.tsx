@@ -70,6 +70,19 @@ import {
   isComposerSendable,
   remainingAttachmentSlots,
 } from '@/lib/composer-state';
+import {
+  ModelOption,
+  RuntimeSelection,
+  ServiceTier,
+  compactRuntimeLabel,
+  effectiveReasoningEffort,
+  extractModels,
+  featuredModelOptions,
+  hasNonFeaturedModels,
+  normalizeServiceTier,
+  reasoningTitle,
+  selectedModelOption,
+} from '@/lib/protocol/runtime';
 
 // How many threads each project section shows by default in the sidebar drawer.
 // Tap "Show all (N)" on a section to reveal the rest. Mirrors the leaner
@@ -111,7 +124,7 @@ type Status =
       composer: string;
       attachments: ComposerAttachment[];
       planArmed: boolean;
-      modelLabel: string;
+      selection: RuntimeSelection;
       activeTurnId: string | null;
       streamingText: string;
       isSending: boolean;
@@ -143,6 +156,10 @@ export default function PairScreen() {
   const router = useRouter();
   const [status, setStatus] = useState<Status>({ kind: 'loading' });
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Models are loaded once after `initialize` and stay valid for the whole
+  // session. Kept in component state (not a ref) so the model-pill label
+  // re-renders when the bridge response lands.
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const clientRef = useRef<RelayClient | null>(null);
   const pairingRef = useRef<PairingContext | null>(null);
   const modeRef = useRef<HandshakeMode>('qr_bootstrap');
@@ -372,6 +389,24 @@ export default function PairScreen() {
         return;
       }
 
+      // 1.5) model/list — runtime models for the picker. Tolerate failure:
+      // older bridges may not expose this method, in which case the picker
+      // falls back to "Default" and we send no model field on turn/start.
+      try {
+        const modelsResp = await client.sendRequest('model/list', {
+          cursor: null,
+          limit: 50,
+          includeHidden: false,
+        });
+        if (modelsResp.ok) {
+          const models = extractModels(modelsResp.result);
+          if (!cancelled) setAvailableModels(models);
+        }
+      } catch {
+        // Silent: picker stays in "Default" state. Future: show toast on first
+        // open of the picker if availableModels is still empty.
+      }
+
       // 2) thread/list — paginated; for MVP just grab the first page.
       const listResp = await client.sendRequest('thread/list', { limit: 50 });
       if (!listResp.ok) {
@@ -446,7 +481,7 @@ export default function PairScreen() {
         composer: INITIAL_COMPOSER_STATE.text,
         attachments: INITIAL_COMPOSER_STATE.attachments,
         planArmed: INITIAL_COMPOSER_STATE.planArmed,
-        modelLabel: INITIAL_COMPOSER_STATE.modelLabel,
+        selection: { modelId: null, reasoningEffort: null, serviceTier: null },
         activeTurnId: null,
         streamingText: '',
         isSending: false,
@@ -607,10 +642,23 @@ export default function PairScreen() {
       activeTurnId: null,
     });
 
-    const resp = await client.sendRequest('turn/start', {
+    // Mirrors iOS buildTurnStartRequestParams — top-level model/effort/
+    // serviceTier are kept "legacy" alongside collaborationMode but the bridge
+    // still honors them, and we don't send collaborationMode yet (plan mode is
+    // visible-only until the developer-instructions payload is wired).
+    const startParams: Record<string, unknown> = {
       threadId: cur.thread.id,
       input: [{ type: 'text', text }],
-    });
+    };
+    const sel = cur.selection;
+    const selectedModel = selectedModelOption(availableModels, sel);
+    if (selectedModel) startParams.model = selectedModel.model;
+    const effort = effectiveReasoningEffort(selectedModel, sel);
+    if (effort) startParams.effort = effort;
+    const tier = normalizeServiceTier(selectedModel, sel.serviceTier);
+    if (tier) startParams.serviceTier = tier;
+
+    const resp = await client.sendRequest('turn/start', startParams);
 
     if (!resp.ok) {
       setStatus((prev) => {
@@ -636,6 +684,12 @@ export default function PairScreen() {
 
   function setPlanArmed(armed: boolean) {
     setStatus((prev) => (prev.kind === 'thread-ready' ? { ...prev, planArmed: armed } : prev));
+  }
+
+  function setSelection(update: (sel: RuntimeSelection) => RuntimeSelection) {
+    setStatus((prev) =>
+      prev.kind === 'thread-ready' ? { ...prev, selection: update(prev.selection) } : prev,
+    );
   }
 
   function removeAttachment(id: string) {
@@ -837,7 +891,8 @@ export default function PairScreen() {
                 text={status.composer}
                 attachments={status.attachments}
                 planArmed={status.planArmed}
-                modelLabel={status.modelLabel}
+                models={availableModels}
+                selection={status.selection}
                 isSending={status.isSending}
                 onChange={setComposer}
                 onSend={sendPrompt}
@@ -845,6 +900,15 @@ export default function PairScreen() {
                 onTakePhoto={takePhoto}
                 onTogglePlan={() => setPlanArmed(!status.planArmed)}
                 onRemoveAttachment={removeAttachment}
+                onSelectModel={(modelId) =>
+                  setSelection((sel) => ({ ...sel, modelId }))
+                }
+                onSelectReasoningEffort={(effort) =>
+                  setSelection((sel) => ({ ...sel, reasoningEffort: effort }))
+                }
+                onSelectServiceTier={(tier) =>
+                  setSelection((sel) => ({ ...sel, serviceTier: tier }))
+                }
               />
             </KeyboardAvoidingView>
           )}
@@ -1155,7 +1219,8 @@ function Composer({
   text,
   attachments,
   planArmed,
-  modelLabel,
+  models,
+  selection,
   isSending,
   onChange,
   onSend,
@@ -1163,11 +1228,15 @@ function Composer({
   onTakePhoto,
   onTogglePlan,
   onRemoveAttachment,
+  onSelectModel,
+  onSelectReasoningEffort,
+  onSelectServiceTier,
 }: {
   text: string;
   attachments: ComposerAttachment[];
   planArmed: boolean;
-  modelLabel: string;
+  models: ModelOption[];
+  selection: RuntimeSelection;
   isSending: boolean;
   onChange: (s: string) => void;
   onSend: () => void;
@@ -1175,8 +1244,12 @@ function Composer({
   onTakePhoto: () => void;
   onTogglePlan: () => void;
   onRemoveAttachment: (id: string) => void;
+  onSelectModel: (modelId: string) => void;
+  onSelectReasoningEffort: (effort: string) => void;
+  onSelectServiceTier: (tier: ServiceTier | null) => void;
 }) {
   const [plusOpen, setPlusOpen] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const insets = useSafeAreaInsets();
   const sendable = isComposerSendable({
     ...INITIAL_COMPOSER_STATE,
@@ -1184,6 +1257,8 @@ function Composer({
     attachments,
   });
   const sendDisabled = !sendable || isSending;
+  const modelLabel = compactRuntimeLabel(models, selection);
+  const showsBolt = selection.serviceTier === 'fast';
 
   return (
     <View style={[styles.composerWrap, { paddingBottom: Math.max(insets.bottom, spacing.sm) }]}>
@@ -1228,13 +1303,12 @@ function Composer({
           </Pressable>
 
           <Pressable
-            onPress={() =>
-              Alert.alert(
-                'Model selection',
-                'Bridge runtime/list-models channel not wired yet — using bridge default.',
-              )
-            }
+            onPress={() => setPickerOpen(true)}
+            disabled={models.length === 0}
             style={({ pressed }) => [styles.modelPill, pressed && { opacity: 0.7 }]}>
+            {showsBolt ? (
+              <Icon name="bolt.fill" size={11} color={colors.fg} />
+            ) : null}
             <Text style={styles.modelPillText} numberOfLines={1}>
               {modelLabel}
             </Text>
@@ -1300,6 +1374,16 @@ function Composer({
           onTakePhoto();
         }}
       />
+
+      <ModelPickerSheet
+        visible={pickerOpen}
+        models={models}
+        selection={selection}
+        onClose={() => setPickerOpen(false)}
+        onSelectModel={onSelectModel}
+        onSelectReasoningEffort={onSelectReasoningEffort}
+        onSelectServiceTier={onSelectServiceTier}
+      />
     </View>
   );
 }
@@ -1338,6 +1422,211 @@ function PlusMenu({
         </Pressable>
       </Pressable>
     </Modal>
+  );
+}
+
+// Hierarchical runtime menu mirroring iOS ComposerRuntimeMenuControl. iOS uses
+// a SwiftUI Menu with three sections (Effort / Change model / Speed) — on
+// Android we reproduce the hierarchy in a single Modal that swaps "levels":
+// root shows reasoning options inline and pushes Model / Speed sub-levels.
+function ModelPickerSheet({
+  visible,
+  models,
+  selection,
+  onClose,
+  onSelectModel,
+  onSelectReasoningEffort,
+  onSelectServiceTier,
+}: {
+  visible: boolean;
+  models: ModelOption[];
+  selection: RuntimeSelection;
+  onClose: () => void;
+  onSelectModel: (modelId: string) => void;
+  onSelectReasoningEffort: (effort: string) => void;
+  onSelectServiceTier: (tier: ServiceTier | null) => void;
+}) {
+  const [level, setLevel] = useState<'root' | 'model' | 'speed' | 'all-models'>('root');
+  // Reset to root every time the sheet reopens so it doesn't remember a stale
+  // submenu the user pushed last time.
+  useEffect(() => {
+    if (visible) setLevel('root');
+  }, [visible]);
+
+  const selectedModel = selectedModelOption(models, selection);
+  const featured = featuredModelOptions(models, selection.modelId);
+  const hasMore = hasNonFeaturedModels(models, selection.modelId);
+  const supportsFast = selectedModel?.supportsFastMode ?? false;
+  const reasoningOptions = selectedModel?.supportedReasoningEfforts ?? [];
+  const activeEffort = effectiveReasoningEffort(selectedModel, selection);
+
+  const title =
+    level === 'model' ? 'Model'
+    : level === 'speed' ? 'Speed'
+    : level === 'all-models' ? 'Other models'
+    : 'Intelligence';
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={styles.plusMenuBackdrop} onPress={onClose}>
+        <Pressable style={styles.modelSheet} onPress={(e) => e.stopPropagation()}>
+          <View style={styles.modelSheetHeader}>
+            {level !== 'root' ? (
+              <Pressable onPress={() => setLevel('root')} hitSlop={10} style={styles.modelSheetBack}>
+                <Icon name="chevron.left" size={14} color={colors.fg70} />
+              </Pressable>
+            ) : (
+              <View style={{ width: 22 }} />
+            )}
+            <Text style={styles.modelSheetTitle}>{title}</Text>
+            <View style={{ width: 22 }} />
+          </View>
+
+          {level === 'root' ? (
+            <>
+              {reasoningOptions.length > 0 ? (
+                reasoningOptions.map((opt) => (
+                  <ModelSheetRow
+                    key={opt.reasoningEffort}
+                    label={reasoningTitle(opt.reasoningEffort)}
+                    detail={opt.description}
+                    selected={activeEffort === opt.reasoningEffort}
+                    onPress={() => {
+                      onSelectReasoningEffort(opt.reasoningEffort);
+                    }}
+                  />
+                ))
+              ) : (
+                <Text style={styles.modelSheetEmpty}>
+                  {models.length === 0 ? 'Loading models…' : 'No reasoning options.'}
+                </Text>
+              )}
+
+              <View style={styles.modelSheetDivider} />
+
+              <ModelSheetRow
+                label={selectedModel ? selectedModel.displayName : 'Model'}
+                trailingChevron
+                onPress={() => setLevel('model')}
+              />
+              {supportsFast ? (
+                <ModelSheetRow
+                  label="Speed"
+                  trailingChevron
+                  onPress={() => setLevel('speed')}
+                />
+              ) : null}
+            </>
+          ) : null}
+
+          {level === 'model' ? (
+            <>
+              {featured.map((m) => (
+                <ModelSheetRow
+                  key={m.id}
+                  leadingIcon={m.supportsFastMode ? 'bolt.fill' : undefined}
+                  label={m.displayName}
+                  detail={m.description}
+                  selected={selectedModel?.id === m.id}
+                  onPress={() => {
+                    onSelectModel(m.id);
+                    setLevel('root');
+                  }}
+                />
+              ))}
+              {hasMore ? (
+                <ModelSheetRow
+                  label="Other models"
+                  trailingChevron
+                  onPress={() => setLevel('all-models')}
+                />
+              ) : null}
+            </>
+          ) : null}
+
+          {level === 'all-models' ? (
+            <ScrollView style={{ maxHeight: 360 }}>
+              {models.map((m) => (
+                <ModelSheetRow
+                  key={m.id}
+                  leadingIcon={m.supportsFastMode ? 'bolt.fill' : undefined}
+                  label={m.displayName}
+                  detail={m.description}
+                  selected={selectedModel?.id === m.id}
+                  onPress={() => {
+                    onSelectModel(m.id);
+                    setLevel('root');
+                  }}
+                />
+              ))}
+            </ScrollView>
+          ) : null}
+
+          {level === 'speed' ? (
+            <>
+              <ModelSheetRow
+                label="Standard"
+                detail="Default speed, normal usage"
+                selected={selection.serviceTier === null}
+                onPress={() => {
+                  onSelectServiceTier(null);
+                  setLevel('root');
+                }}
+              />
+              <ModelSheetRow
+                leadingIcon="bolt.fill"
+                label="Fast"
+                detail="1.5× speed, increased usage"
+                selected={selection.serviceTier === 'fast'}
+                onPress={() => {
+                  onSelectServiceTier('fast');
+                  setLevel('root');
+                }}
+              />
+            </>
+          ) : null}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+function ModelSheetRow({
+  label,
+  detail,
+  leadingIcon,
+  trailingChevron,
+  selected,
+  onPress,
+}: {
+  label: string;
+  detail?: string;
+  leadingIcon?: string;
+  trailingChevron?: boolean;
+  selected?: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.modelSheetRow, pressed && { backgroundColor: colors.fg10 }]}>
+      {leadingIcon ? (
+        <Icon name={leadingIcon} size={13} color={colors.fg} />
+      ) : (
+        <View style={{ width: 13 }} />
+      )}
+      <View style={{ flex: 1 }}>
+        <Text style={styles.modelSheetRowLabel}>{label}</Text>
+        {detail ? <Text style={styles.modelSheetRowDetail}>{detail}</Text> : null}
+      </View>
+      {selected ? (
+        <Icon name="checkmark" size={14} color={colors.fg} />
+      ) : trailingChevron ? (
+        <Text style={styles.modelSheetChevron}>›</Text>
+      ) : (
+        <View style={{ width: 14 }} />
+      )}
+    </Pressable>
   );
 }
 
@@ -2135,6 +2424,69 @@ const styles = StyleSheet.create({
     height: StyleSheet.hairlineWidth,
     backgroundColor: colors.fg10,
     marginHorizontal: spacing.lg,
+  },
+  modelSheet: {
+    backgroundColor: colors.bg,
+    borderRadius: radius.card,
+    borderWidth: 1,
+    borderColor: colors.fg10,
+    overflow: 'hidden',
+  },
+  modelSheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm + 2,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.fg10,
+  },
+  modelSheetBack: {
+    width: 22,
+    height: 22,
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+  },
+  modelSheetTitle: {
+    flex: 1,
+    color: colors.fg45,
+    fontSize: fontSize.footnote,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    textAlign: 'center',
+    fontWeight: weight.semibold,
+  },
+  modelSheetRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: 12,
+  },
+  modelSheetRowLabel: {
+    color: colors.fg,
+    fontSize: fontSize.body,
+  },
+  modelSheetRowDetail: {
+    color: colors.fg45,
+    fontSize: fontSize.caption,
+    marginTop: 2,
+  },
+  modelSheetChevron: {
+    color: colors.fg45,
+    fontSize: 18,
+    width: 14,
+    textAlign: 'right',
+  },
+  modelSheetDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: colors.fg10,
+    marginHorizontal: spacing.lg,
+  },
+  modelSheetEmpty: {
+    color: colors.fg45,
+    fontSize: fontSize.body,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: 12,
   },
   approvalCard: {
     backgroundColor: colors.fg6,
