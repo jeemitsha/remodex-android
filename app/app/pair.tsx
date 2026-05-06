@@ -76,7 +76,15 @@ import { colors, fontSize, radius, spacing, weight } from '@/lib/theme/tokens';
 
 // Thread/turn types and parsers live in lib/protocol/extract.ts so they can be
 // fixture-tested. Keep the imports here narrow.
-import { extractThreads, extractTurnMeta, extractTurns, ThreadRow, TurnMeta, TurnRow } from '@/lib/protocol/extract';
+import {
+  extractNextCursor,
+  extractThreads,
+  extractTurnMeta,
+  extractTurns,
+  ThreadRow,
+  TurnMeta,
+  TurnRow,
+} from '@/lib/protocol/extract';
 import { formatDuration } from '@/lib/format';
 import { IntermediateBlock, TurnDisplay, buildTurnDisplays } from '@/lib/turn-display';
 import {
@@ -153,6 +161,11 @@ type Status =
       turns: TurnRow[];
       turnMeta: TurnMeta[];
       rawTurns: unknown;
+      // Pagination cursor for older turns. When non-null, the bridge has more
+      // history; the FlatList header offers a "Load older" tap-target which
+      // bumps `loadingMoreTurns` while the request is in flight.
+      olderCursor: string | null;
+      loadingMoreTurns: boolean;
       composer: string;
       attachments: ComposerAttachment[];
       planArmed: boolean;
@@ -556,6 +569,8 @@ export default function PairScreen() {
         turns: extractTurns(resp.result),
         turnMeta: extractTurnMeta(resp.result),
         rawTurns: resp.result,
+        olderCursor: extractNextCursor(resp.result),
+        loadingMoreTurns: false,
         composer: INITIAL_COMPOSER_STATE.text,
         attachments: INITIAL_COMPOSER_STATE.attachments,
         planArmed: INITIAL_COMPOSER_STATE.planArmed,
@@ -871,6 +886,54 @@ export default function PairScreen() {
     );
   }
 
+  async function loadOlderTurns() {
+    const cur = status;
+    if (cur.kind !== 'thread-ready') return;
+    if (cur.loadingMoreTurns || !cur.olderCursor) return;
+    const client = clientRef.current;
+    if (!client) return;
+
+    setStatus((prev) =>
+      prev.kind === 'thread-ready' ? { ...prev, loadingMoreTurns: true } : prev,
+    );
+
+    const resp = await client.sendRequest('thread/turns/list', {
+      threadId: cur.thread.id,
+      limit: 80,
+      sortDirection: 'desc',
+      cursor: cur.olderCursor,
+    });
+
+    if (!resp.ok) {
+      setStatus((prev) =>
+        prev.kind === 'thread-ready' ? { ...prev, loadingMoreTurns: false } : prev,
+      );
+      return;
+    }
+
+    const olderTurns = extractTurns(resp.result);
+    const olderMeta = extractTurnMeta(resp.result);
+    const newCursor = extractNextCursor(resp.result);
+
+    setStatus((prev) => {
+      if (prev.kind !== 'thread-ready' || prev.thread.id !== cur.thread.id) return prev;
+      // extractTurns reverses the bridge's desc order into chronological. So
+      // older turns belong AT THE TOP of the existing turns array. Dedupe by
+      // id since the cursor boundary can occasionally include an overlap row.
+      const seen = new Set(prev.turns.map((t) => t.id));
+      const dedupedOlder = olderTurns.filter((t) => !seen.has(t.id));
+      const seenMeta = new Set(prev.turnMeta.map((m) => m.id));
+      const dedupedMeta = olderMeta.filter((m) => !seenMeta.has(m.id));
+      return {
+        ...prev,
+        turns: [...dedupedOlder, ...prev.turns],
+        turnMeta: [...dedupedMeta, ...prev.turnMeta],
+        olderCursor: newCursor,
+        loadingMoreTurns: false,
+      };
+    });
+  }
+
   async function refreshContextUsage(threadId: string) {
     const client = clientRef.current;
     if (!client) return;
@@ -1088,6 +1151,23 @@ export default function PairScreen() {
                     <Text style={styles.body50}>This thread has no turns yet.</Text>
                   </View>
                 }
+                ListHeaderComponent={
+                  status.olderCursor ? (
+                    <Pressable
+                      onPress={loadOlderTurns}
+                      disabled={status.loadingMoreTurns}
+                      style={({ pressed }) => [
+                        styles.loadOlderRow,
+                        pressed && { opacity: 0.6 },
+                      ]}>
+                      {status.loadingMoreTurns ? (
+                        <ActivityIndicator color={colors.fg45} size="small" />
+                      ) : (
+                        <Text style={styles.loadOlderText}>Load older messages</Text>
+                      )}
+                    </Pressable>
+                  ) : null
+                }
                 ListFooterComponent={
                   status.streamingText ? (
                     <View style={styles.assistantBlock}>
@@ -1097,6 +1177,19 @@ export default function PairScreen() {
                     </View>
                   ) : null
                 }
+                onScroll={(e) => {
+                  // Auto-fire pagination when the user scrolls to within 80px
+                  // of the top — feels like infinite scroll without needing
+                  // RN's missing onStartReached.
+                  if (
+                    status.olderCursor
+                    && !status.loadingMoreTurns
+                    && e.nativeEvent.contentOffset.y < 80
+                  ) {
+                    void loadOlderTurns();
+                  }
+                }}
+                scrollEventThrottle={250}
                 renderItem={({ item }) => (
                   <TurnDisplayView
                     turn={item}
@@ -3125,6 +3218,14 @@ const styles = StyleSheet.create({
   voiceSecondaryBtnText: {
     color: colors.fg,
     fontSize: fontSize.body,
+  },
+  loadOlderRow: {
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+  },
+  loadOlderText: {
+    color: colors.fg45,
+    fontSize: fontSize.subheadline,
   },
   topProgressTrack: {
     position: 'absolute',

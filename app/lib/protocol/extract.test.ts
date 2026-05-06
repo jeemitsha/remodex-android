@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { extractThreads, extractTurns } from './extract';
+import { extractNextCursor, extractThreads, extractTurns } from './extract';
 
 const FIX = join(__dirname, '..', '__fixtures__');
 
@@ -47,6 +47,25 @@ describe('extractThreads (against captured thread/list response)', () => {
     expect(withTs).toBeDefined();
     // Real epoch values must be > Jan 1 2024 in ms
     expect(withTs!.updatedAt as number).toBeGreaterThan(1_700_000_000_000);
+  });
+});
+
+describe('extractNextCursor', () => {
+  it('returns null for missing/empty cursors', () => {
+    expect(extractNextCursor({})).toBeNull();
+    expect(extractNextCursor({ nextCursor: null })).toBeNull();
+    expect(extractNextCursor({ nextCursor: '' })).toBeNull();
+    expect(extractNextCursor({ next_cursor: '' })).toBeNull();
+    expect(extractNextCursor(null)).toBeNull();
+  });
+
+  it('returns the cursor string when present', () => {
+    expect(extractNextCursor({ nextCursor: 'abc123' })).toBe('abc123');
+    expect(extractNextCursor({ next_cursor: 'snake' })).toBe('snake');
+  });
+
+  it('handles wrapped cursor objects { value: ... }', () => {
+    expect(extractNextCursor({ nextCursor: { value: 'wrapped' } })).toBe('wrapped');
   });
 });
 

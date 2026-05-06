@@ -107,6 +107,25 @@ export function extractTurnMeta(result: unknown): TurnMeta[] {
   return out;
 }
 
+// Pulls the next-page cursor out of a thread/turns/list (or thread/list)
+// response. Bridges have shipped both `nextCursor` and `next_cursor`. Returns
+// null when there are no more pages — paging stops on null/undefined/"".
+export function extractNextCursor(result: unknown): string | null {
+  if (!result || typeof result !== 'object') return null;
+  const obj = result as Record<string, unknown>;
+  for (const key of ['nextCursor', 'next_cursor'] as const) {
+    const v = obj[key];
+    if (typeof v === 'string' && v.length > 0) return v;
+    // Some bridges nest cursor objects { cursor: { value: "..." } } — keep
+    // tolerance loose.
+    if (v && typeof v === 'object') {
+      const nested = (v as Record<string, unknown>).value;
+      if (typeof nested === 'string' && nested.length > 0) return nested;
+    }
+  }
+  return null;
+}
+
 export function extractThreads(result: unknown): ThreadRow[] {
   const list = pickArray(result, ['data', 'items', 'threads']);
   return list.map(toThreadRow).filter((t): t is ThreadRow => !!t);
