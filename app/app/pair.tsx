@@ -58,11 +58,17 @@ type ThreadRow = {
 
 type TurnRow = {
   id: string;
-  role: 'user' | 'assistant' | 'system' | 'tool' | 'unknown';
+  role: 'user' | 'assistant' | 'system' | 'tool' | 'approval' | 'unknown';
   text: string;
   status?: string;
   createdAt?: number | string;
   raw: unknown; // for debug rendering when nothing else parses
+  // Only present when role === 'approval':
+  approvalRequestId?: number | string;
+  approvalMethod?: string;
+  approvalCommand?: string;
+  approvalReason?: string;
+  approvalDecision?: 'accept' | 'reject';
 };
 
 type Status =
@@ -221,6 +227,12 @@ export default function PairScreen() {
               }
               handleNotification(event.method, event.params);
               return;
+            case 'serverRequest':
+              if (__DEV__) {
+                console.log('[remodex] server req:', event.method, event.id);
+              }
+              handleServerRequest(event.id, event.method, event.params);
+              return;
             case 'error':
               setStatus({
                 kind: 'error',
@@ -370,6 +382,57 @@ export default function PairScreen() {
         message: `${resp.error.message} (${resp.error.code})`,
       });
     }
+  }
+
+  function handleServerRequest(id: number | string, method: string, params: unknown) {
+    // Approval requests come as JSON-RPC requests with method ending in
+    // "requestApproval". Per CodexService+Incoming.swift line 125-138.
+    if (!method.endsWith('requestApproval') && method !== 'item/tool/requestUserInput') {
+      // Other server requests we don't yet understand — error back so the bridge
+      // doesn't hang waiting for a response.
+      clientRef.current?.sendErrorResponse(id, -32601, `Unsupported method: ${method}`);
+      return;
+    }
+
+    setStatus((prev) => {
+      if (prev.kind !== 'thread-ready') return prev;
+      const p = (params && typeof params === 'object' ? (params as Record<string, unknown>) : {}) as Record<string, unknown>;
+      const threadId = typeof p.threadId === 'string' ? p.threadId : undefined;
+      if (threadId && threadId !== prev.thread.id) {
+        // Approval is for a different thread — auto-reject so we don't strand
+        // the bridge. We'll do a smarter inbox later when there's UI for cross-
+        // thread approvals.
+        clientRef.current?.sendResponse(id, { decision: 'reject' });
+        return prev;
+      }
+
+      const approval: TurnRow = {
+        id: `approval-${id}`,
+        role: 'approval',
+        text: '',
+        raw: p,
+        approvalRequestId: id,
+        approvalMethod: method,
+        approvalCommand: pickString(p.command, p.shellCommand, p.path),
+        approvalReason: pickString(p.reason, p.justification, p.summary),
+      };
+      return { ...prev, turns: [approval, ...prev.turns] };
+    });
+  }
+
+  function decideApproval(turn: TurnRow, decision: 'accept' | 'reject') {
+    const id = turn.approvalRequestId;
+    if (id === undefined || id === null) return;
+    clientRef.current?.sendResponse(id, { decision });
+    setStatus((prev) => {
+      if (prev.kind !== 'thread-ready') return prev;
+      return {
+        ...prev,
+        turns: prev.turns.map((t) =>
+          t.id === turn.id ? { ...t, approvalDecision: decision } : t,
+        ),
+      };
+    });
   }
 
   function handleNotification(method: string, params: unknown) {
@@ -637,7 +700,13 @@ export default function PairScreen() {
                     </View>
                   ) : null
                 }
-                renderItem={({ item }) => <TurnView turn={item} />}
+                renderItem={({ item }) => (
+                  <TurnView
+                    turn={item}
+                    onApprove={(t) => decideApproval(t, 'accept')}
+                    onReject={(t) => decideApproval(t, 'reject')}
+                  />
+                )}
                 contentContainerStyle={styles.turnsPad}
               />
               <Composer
@@ -775,7 +844,18 @@ function pickString(...candidates: unknown[]): string {
   return '';
 }
 
-function TurnView({ turn }: { turn: TurnRow }) {
+function TurnView({
+  turn,
+  onApprove,
+  onReject,
+}: {
+  turn: TurnRow;
+  onApprove?: (turn: TurnRow) => void;
+  onReject?: (turn: TurnRow) => void;
+}) {
+  if (turn.role === 'approval') {
+    return <ApprovalCard turn={turn} onApprove={onApprove} onReject={onReject} />;
+  }
   const isUser = turn.role === 'user';
   const isAssistant = turn.role === 'assistant';
   return (
@@ -788,6 +868,58 @@ function TurnView({ turn }: { turn: TurnRow }) {
       </Text>
     </View>
   );
+}
+
+function ApprovalCard({
+  turn,
+  onApprove,
+  onReject,
+}: {
+  turn: TurnRow;
+  onApprove?: (turn: TurnRow) => void;
+  onReject?: (turn: TurnRow) => void;
+}) {
+  const kind = approvalKindLabel(turn.approvalMethod || '');
+  const decided = turn.approvalDecision;
+  return (
+    <View style={styles.approvalCard}>
+      <Text style={styles.approvalKind}>{kind}</Text>
+      {turn.approvalCommand ? (
+        <Text style={styles.approvalCommand} numberOfLines={6}>
+          {turn.approvalCommand}
+        </Text>
+      ) : null}
+      {turn.approvalReason ? (
+        <Text style={styles.approvalReason}>{turn.approvalReason}</Text>
+      ) : null}
+      {decided ? (
+        <Text style={[styles.approvalDecided, decided === 'accept' ? { color: '#9be39a' } : { color: '#ff8b8b' }]}>
+          {decided === 'accept' ? '✓ Approved' : '✕ Rejected'}
+        </Text>
+      ) : (
+        <View style={styles.approvalActions}>
+          <Pressable
+            onPress={() => onReject?.(turn)}
+            style={({ pressed }) => [styles.approvalRejectBtn, pressed && { opacity: 0.7 }]}>
+            <Text style={styles.approvalRejectText}>Reject</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => onApprove?.(turn)}
+            style={({ pressed }) => [styles.approvalApproveBtn, pressed && { opacity: 0.7 }]}>
+            <Text style={styles.approvalApproveText}>Approve</Text>
+          </Pressable>
+        </View>
+      )}
+    </View>
+  );
+}
+
+function approvalKindLabel(method: string): string {
+  if (method.includes('commandExecution')) return 'Run command';
+  if (method.includes('fileChange')) return 'Apply file change';
+  if (method.includes('requestUserInput')) return 'User input requested';
+  if (method.endsWith('requestApproval')) return method.replace(/\/requestApproval$/, '');
+  return method || 'Approval requested';
 }
 
 function extractTurns(result: unknown): TurnRow[] {
@@ -1137,4 +1269,51 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  approvalCard: {
+    backgroundColor: colors.fg6,
+    borderRadius: radius.card,
+    padding: spacing.lg,
+    marginVertical: spacing.sm,
+    gap: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.planBorderTop,
+  },
+  approvalKind: {
+    color: colors.plan,
+    fontSize: fontSize.caption2,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    fontWeight: weight.semibold,
+  },
+  approvalCommand: {
+    color: colors.fg,
+    fontFamily: 'Menlo',
+    fontSize: fontSize.footnote + 1,
+    backgroundColor: colors.bg,
+    padding: spacing.sm,
+    borderRadius: radius.sm,
+  },
+  approvalReason: { color: colors.fg70, fontSize: fontSize.caption, lineHeight: 16 },
+  approvalDecided: { fontSize: fontSize.caption, fontWeight: weight.semibold },
+  approvalActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+  },
+  approvalRejectBtn: {
+    flex: 1,
+    backgroundColor: colors.fg10,
+    paddingVertical: 10,
+    borderRadius: radius.capsule,
+    alignItems: 'center',
+  },
+  approvalRejectText: { color: colors.fg, fontWeight: weight.semibold },
+  approvalApproveBtn: {
+    flex: 1,
+    backgroundColor: colors.plan,
+    paddingVertical: 10,
+    borderRadius: radius.capsule,
+    alignItems: 'center',
+  },
+  approvalApproveText: { color: colors.fg, fontWeight: weight.semibold },
 });

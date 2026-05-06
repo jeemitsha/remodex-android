@@ -21,6 +21,7 @@ export type RelayClientEvent =
   | { type: 'paired'; session: SecureSession }
   | { type: 'application'; payloadText: string }
   | { type: 'notification'; method: string; params: unknown }
+  | { type: 'serverRequest'; id: number | string; method: string; params: unknown }
   | { type: 'error'; message: string; code?: string }
   | { type: 'closed'; code: number; reason?: string };
 
@@ -32,6 +33,9 @@ export type RelayClient = {
   close: () => void;
   sendRequest: (method: string, params?: unknown, timeoutMs?: number) => Promise<JsonRpcResponse>;
   sendNotification: (method: string, params?: unknown) => void;
+  // Reply to a server-initiated request (e.g. an approval prompt).
+  sendResponse: (id: number | string, result: unknown) => void;
+  sendErrorResponse: (id: number | string, code: number, message: string) => void;
 };
 
 export function createRelayClient(opts: {
@@ -126,19 +130,25 @@ export function createRelayClient(opts: {
   function handleApplicationMessage(payloadText: string): void {
     emit({ type: 'application', payloadText });
 
-    let rpc: { id?: number; method?: string; params?: unknown; result?: unknown; error?: any };
+    let rpc: { id?: number | string; method?: string; params?: unknown; result?: unknown; error?: any };
     try {
       rpc = JSON.parse(payloadText);
     } catch {
       return;
     }
 
+    // Server-initiated request: has both `method` AND `id` — needs a response.
+    if (rpc.method && rpc.id !== undefined && rpc.id !== null) {
+      emit({ type: 'serverRequest', id: rpc.id, method: rpc.method, params: rpc.params });
+      return;
+    }
+
     // Response: has `id` and either `result` or `error`, no `method`.
-    if (rpc.id !== undefined && !rpc.method) {
-      const pending = pendingRequests.get(rpc.id);
+    if (rpc.id !== undefined && rpc.id !== null && !rpc.method) {
+      const pending = pendingRequests.get(rpc.id as number);
       if (pending) {
         if (pending.timer) clearTimeout(pending.timer);
-        pendingRequests.delete(rpc.id);
+        pendingRequests.delete(rpc.id as number);
         if (rpc.error) {
           pending.resolve({ ok: false, error: rpc.error });
         } else {
@@ -148,7 +158,7 @@ export function createRelayClient(opts: {
       return;
     }
 
-    // Notification: has `method`, no `id` (or id is null).
+    // Notification: has `method`, no `id`.
     if (rpc.method) {
       emit({ type: 'notification', method: rpc.method, params: rpc.params });
     }
@@ -182,6 +192,16 @@ export function createRelayClient(opts: {
     sendApplication({ jsonrpc: '2.0', method, params: params ?? {} });
   }
 
+  function sendResponse(id: number | string, result: unknown): void {
+    if (!secure || !secure.isPaired()) return;
+    sendApplication({ jsonrpc: '2.0', id, result });
+  }
+
+  function sendErrorResponse(id: number | string, code: number, message: string): void {
+    if (!secure || !secure.isPaired()) return;
+    sendApplication({ jsonrpc: '2.0', id, error: { code, message } });
+  }
+
   function sendApplication(rpc: unknown): void {
     if (!secure || !secure.isPaired()) {
       throw new Error('Cannot send application message before pairing is complete');
@@ -195,6 +215,8 @@ export function createRelayClient(opts: {
     close: () => ws.close(),
     sendRequest,
     sendNotification,
+    sendResponse,
+    sendErrorResponse,
   };
 }
 
