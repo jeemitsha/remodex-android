@@ -35,3 +35,6 @@ yarn-error.*
 # Synthetic fixtures (no real sessionIds) live in version control so tests
 # work on CI without a live bridge. List them explicitly here.
 !app/lib/__fixtures__/model-list.response.json
+# Cached phone identity for npm run capture so fixture refreshes don't need
+# a fresh QR each time. Bearer-like; never check in.
+**/__fixtures__/.identity.cache.json

@@ -3,7 +3,7 @@
 // `lib/__fixtures__/*.json`. These fixtures back our parser unit tests so we
 // stop guessing about response shape.
 //
-// Usage:
+// First run: needs ./pairing.json (the QR's JSON payload — see steps 1-4 below).
 //   1. In one terminal, start the patched relay:
 //        cd relay-local && BIND_HOST=0.0.0.0 PORT=9000 npm start
 //   2. In another terminal, start the bridge:
@@ -14,19 +14,27 @@
 //   4. Save the pairing JSON to ./pairing.json (gitignored), then:
 //        npm run capture
 //
-// The script never persists identity to disk; each run uses an ephemeral
-// keypair so we don't pollute the bridge's trusted-phone registry.
+// Subsequent runs: identity is cached at lib/__fixtures__/.identity.cache.json
+// (gitignored). The script reuses that identity + asks the relay for a fresh
+// sessionId via /v1/trusted/session/resolve, so no new QR is needed. Run
+// REMODEX_CAPTURE_RESET=1 npm run capture to wipe the cache and re-pair.
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 
-import { generateEd25519KeyPair } from '../lib/protocol/crypto.js';
+import {
+  base64ToBytes,
+  ed25519Sign,
+  generateEd25519KeyPair,
+  utf8Bytes,
+} from '../lib/protocol/crypto.js';
 import { PairingPayload, parsePairingQR } from '../lib/protocol/qr.js';
 import {
   EncryptedEnvelope,
   HandshakeEvent,
+  HandshakeMode,
   PairingContext,
   createSecureTransport,
 } from '../lib/protocol/secureTransport.js';
@@ -35,36 +43,40 @@ import { randomUUID } from 'node:crypto';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_APP_DIR = join(__dirname, '..');
 const FIXTURES_DIR = join(REPO_APP_DIR, 'lib', '__fixtures__');
+const IDENTITY_CACHE_PATH = join(FIXTURES_DIR, '.identity.cache.json');
+
+type IdentityCache = {
+  identity: {
+    phoneDeviceId: string;
+    phoneIdentityPublicKey: string;
+    phoneIdentityPrivateKey: string;
+  };
+  macDeviceId: string;
+  macIdentityPublicKey: string;
+  relay: string;
+};
+
+type Bootstrap = {
+  pairing: PairingContext;
+  identity: IdentityCache['identity'];
+  handshakeMode: HandshakeMode;
+};
 
 async function main() {
-  const pairingPath = process.env.REMODEX_PAIRING_PATH || join(REPO_APP_DIR, 'pairing.json');
-  const raw = await readFile(pairingPath, 'utf8').catch((e) => {
-    console.error(`✗ Could not read ${pairingPath}: ${e.message}`);
-    console.error('  Save the QR JSON from `remodex up` output to that path first.');
-    process.exit(2);
-  });
-
-  const parsed = parsePairingQR(raw);
-  if (!parsed.ok) {
-    console.error(`✗ Pairing JSON failed to parse: ${parsed.error}`);
-    process.exit(2);
+  if (process.env.REMODEX_CAPTURE_RESET === '1') {
+    await unlink(IDENTITY_CACHE_PATH).catch(() => {});
+    console.log('→ Identity cache cleared (REMODEX_CAPTURE_RESET=1).');
   }
-  if (parsed.isExpired) {
-    console.error('✗ Pairing JSON expired. Re-run `remodex up` and copy the new QR.');
-    process.exit(2);
-  }
-  const pairing: PairingPayload = parsed.payload;
-  console.log(`→ Pairing payload v${pairing.v} relay=${pairing.relay}`);
-  console.log(`  sessionId=${shorten(pairing.sessionId)} expiresAt=${new Date(pairing.expiresAt).toISOString()}`);
 
-  // Ephemeral phone identity for this capture run only.
-  const idKp = generateEd25519KeyPair();
-  const identity = {
-    phoneDeviceId: randomUUID(),
-    phoneIdentityPublicKey: idKp.publicKeyBase64,
-    phoneIdentityPrivateKey: idKp.privateKeyBase64,
-  };
-  console.log(`→ Ephemeral phoneDeviceId=${shorten(identity.phoneDeviceId)}`);
+  const cache = await readIdentityCache();
+  const bootstrap = cache
+    ? await bootstrapFromCache(cache)
+    : await bootstrapFromQR();
+
+  const pairing = bootstrap.pairing;
+  const identity = bootstrap.identity;
+  console.log(`→ Mode: ${bootstrap.handshakeMode}`);
+  console.log(`  sessionId=${shorten(pairing.sessionId)} mac=${shorten(pairing.macDeviceId)}`);
 
   const url = `${pairing.relay.replace(/\/+$/, '')}/${pairing.sessionId}?role=android`;
   const ws = new WebSocket(url, {
@@ -78,17 +90,11 @@ async function main() {
   const pairedPromise = new Promise<void>((resolve) => (pairedResolve = resolve));
 
   let lastErrorMsg = '';
-  const ctx: PairingContext = {
-    relay: pairing.relay,
-    sessionId: pairing.sessionId,
-    macDeviceId: pairing.macDeviceId,
-    macIdentityPublicKey: pairing.macIdentityPublicKey,
-  };
 
   const transport = createSecureTransport({
-    pairing: ctx,
+    pairing,
     identity,
-    handshakeMode: 'qr_bootstrap',
+    handshakeMode: bootstrap.handshakeMode,
     sendWire: (text) => ws.readyState === WebSocket.OPEN && ws.send(text),
     emit: (event: HandshakeEvent) => {
       if (event.type === 'stage') {
@@ -152,6 +158,20 @@ async function main() {
     pairedPromise,
     new Promise((_, rej) => setTimeout(() => rej(new Error('handshake timeout')), 15_000)),
   ]);
+
+  // First-time qr_bootstrap pair → persist identity + mac details for later
+  // runs to use trusted_session_resolve and skip the QR.
+  if (bootstrap.handshakeMode === 'qr_bootstrap') {
+    await mkdir(FIXTURES_DIR, { recursive: true });
+    const cacheRecord: IdentityCache = {
+      identity,
+      macDeviceId: pairing.macDeviceId,
+      macIdentityPublicKey: pairing.macIdentityPublicKey,
+      relay: pairing.relay,
+    };
+    await writeFile(IDENTITY_CACHE_PATH, JSON.stringify(cacheRecord, null, 2) + '\n', 'utf8');
+    console.log(`→ Identity cached at ${IDENTITY_CACHE_PATH}`);
+  }
 
   async function rpc(method: string, params: unknown = {}, timeoutMs = 30_000): Promise<{ result?: unknown; error?: any }> {
     const id = nextRpcId++;
@@ -245,6 +265,201 @@ function waitForOpen(ws: WebSocket): Promise<void> {
     ws.once('open', () => resolve());
     ws.once('error', (e) => reject(e));
   });
+}
+
+async function readIdentityCache(): Promise<IdentityCache | null> {
+  try {
+    const raw = await readFile(IDENTITY_CACHE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (
+      parsed
+      && parsed.identity?.phoneDeviceId
+      && parsed.identity?.phoneIdentityPublicKey
+      && parsed.identity?.phoneIdentityPrivateKey
+      && parsed.macDeviceId
+      && parsed.macIdentityPublicKey
+      && parsed.relay
+    ) {
+      return parsed as IdentityCache;
+    }
+    console.warn('⚠ Identity cache malformed; ignoring.');
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function bootstrapFromQR(): Promise<Bootstrap> {
+  const pairingPath = process.env.REMODEX_PAIRING_PATH || join(REPO_APP_DIR, 'pairing.json');
+  const raw = await readFile(pairingPath, 'utf8').catch((e) => {
+    console.error(`✗ Could not read ${pairingPath}: ${e.message}`);
+    console.error('  Save the QR JSON from `remodex up` output to that path first.');
+    process.exit(2);
+  });
+
+  const parsed = parsePairingQR(raw);
+  if (!parsed.ok) {
+    console.error(`✗ Pairing JSON failed to parse: ${parsed.error}`);
+    process.exit(2);
+  }
+  if (parsed.isExpired) {
+    console.error('✗ Pairing JSON expired. Re-run `remodex up` and copy the new QR.');
+    process.exit(2);
+  }
+  const pairing: PairingPayload = parsed.payload;
+  console.log(`→ Pairing payload v${pairing.v} relay=${pairing.relay}`);
+  console.log(`  expiresAt=${new Date(pairing.expiresAt).toISOString()}`);
+
+  const idKp = generateEd25519KeyPair();
+  const identity = {
+    phoneDeviceId: randomUUID(),
+    phoneIdentityPublicKey: idKp.publicKeyBase64,
+    phoneIdentityPrivateKey: idKp.privateKeyBase64,
+  };
+  console.log(`→ Fresh phoneDeviceId=${shorten(identity.phoneDeviceId)}`);
+
+  return {
+    pairing: {
+      relay: pairing.relay,
+      sessionId: pairing.sessionId,
+      macDeviceId: pairing.macDeviceId,
+      macIdentityPublicKey: pairing.macIdentityPublicKey,
+    },
+    identity,
+    handshakeMode: 'qr_bootstrap',
+  };
+}
+
+async function bootstrapFromCache(cache: IdentityCache): Promise<Bootstrap> {
+  console.log(`→ Reusing cached identity (phoneDeviceId=${shorten(cache.identity.phoneDeviceId)}).`);
+  console.log(`  Resolving fresh sessionId via ${cache.relay}/v1/trusted/session/resolve…`);
+
+  const resolved = await resolveTrustedSessionInline({
+    relay: cache.relay,
+    macDeviceId: cache.macDeviceId,
+    identity: cache.identity,
+  });
+  if (!resolved.ok) {
+    console.error(`✗ Trusted-session resolve failed: ${resolved.errorMessage}`);
+    console.error('  Run REMODEX_CAPTURE_RESET=1 npm run capture to wipe the cache and re-pair.');
+    process.exit(3);
+  }
+  return {
+    pairing: {
+      relay: cache.relay,
+      sessionId: resolved.sessionId,
+      macDeviceId: resolved.macDeviceId,
+      macIdentityPublicKey: resolved.macIdentityPublicKey,
+    },
+    identity: cache.identity,
+    handshakeMode: 'trusted_reconnect',
+  };
+}
+
+const TRUSTED_SESSION_RESOLVE_TAG = 'remodex-trusted-session-resolve-v1';
+
+async function resolveTrustedSessionInline(opts: {
+  relay: string;
+  macDeviceId: string;
+  identity: IdentityCache['identity'];
+}): Promise<
+  | { ok: true; sessionId: string; macDeviceId: string; macIdentityPublicKey: string }
+  | { ok: false; errorMessage: string }
+> {
+  // Mirrors lib/protocol/trustedSessionResolve.ts but inlined here so the
+  // capture script doesn't drag in expo-crypto.
+  const url = httpResolveUrl(opts.relay);
+  if (!url) return { ok: false, errorMessage: `Unsupported relay scheme: ${opts.relay}` };
+
+  const nonce = randomUUID();
+  const timestamp = Date.now();
+  const transcript = buildResolveTranscript({
+    macDeviceId: opts.macDeviceId,
+    phoneDeviceId: opts.identity.phoneDeviceId,
+    phoneIdentityPublicKey: opts.identity.phoneIdentityPublicKey,
+    nonce,
+    timestamp,
+  });
+  const signature = ed25519Sign(opts.identity.phoneIdentityPrivateKey, transcript);
+
+  const body = {
+    macDeviceId: opts.macDeviceId,
+    phoneDeviceId: opts.identity.phoneDeviceId,
+    phoneIdentityPublicKey: opts.identity.phoneIdentityPublicKey,
+    nonce,
+    timestamp,
+    signature,
+  };
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      return { ok: false, errorMessage: `HTTP ${res.status} ${res.statusText}` };
+    }
+    const json = (await res.json()) as Record<string, unknown>;
+    const sessionId = typeof json.sessionId === 'string' ? json.sessionId : '';
+    const macDeviceId = typeof json.macDeviceId === 'string' ? json.macDeviceId : opts.macDeviceId;
+    const macIdentityPublicKey = typeof json.macIdentityPublicKey === 'string' ? json.macIdentityPublicKey : '';
+    if (!sessionId || !macIdentityPublicKey) {
+      return { ok: false, errorMessage: 'Resolve response missing sessionId or macIdentityPublicKey.' };
+    }
+    return { ok: true, sessionId, macDeviceId, macIdentityPublicKey };
+  } catch (e) {
+    return { ok: false, errorMessage: (e as Error).message };
+  }
+}
+
+function httpResolveUrl(relay: string): string | null {
+  // ws://host[:port][/path]  →  http://host[:port]/v1/trusted/session/resolve
+  // wss://host... → https://...
+  const m = relay.match(/^(wss?):\/\/([^\/?#]+)/);
+  if (!m) return null;
+  const httpScheme = m[1] === 'wss' ? 'https' : 'http';
+  return `${httpScheme}://${m[2]}/v1/trusted/session/resolve`;
+}
+
+function buildResolveTranscript(args: {
+  macDeviceId: string;
+  phoneDeviceId: string;
+  phoneIdentityPublicKey: string;
+  nonce: string;
+  timestamp: number;
+}): Uint8Array {
+  return concatBytes([
+    lpUtf8(TRUSTED_SESSION_RESOLVE_TAG),
+    lpUtf8(args.macDeviceId),
+    lpUtf8(args.phoneDeviceId),
+    lpBytes(base64ToBytes(args.phoneIdentityPublicKey)),
+    lpUtf8(args.nonce),
+    lpUtf8(String(args.timestamp)),
+  ]);
+}
+
+function lpUtf8(s: string): Uint8Array {
+  return lpBytes(utf8Bytes(s));
+}
+
+function lpBytes(bytes: Uint8Array): Uint8Array {
+  const out = new Uint8Array(4 + bytes.length);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0, bytes.length, false); // big-endian length prefix
+  out.set(bytes, 4);
+  return out;
+}
+
+function concatBytes(parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((sum, p) => sum + p.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const p of parts) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
 }
 
 main().catch((e) => {
