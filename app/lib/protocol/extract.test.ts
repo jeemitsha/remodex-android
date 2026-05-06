@@ -6,7 +6,13 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { extractNextCursor, extractThreads, extractTurns } from './extract';
+import {
+  computeDiffTotals,
+  decodeFileChanges,
+  extractNextCursor,
+  extractThreads,
+  extractTurns,
+} from './extract';
 
 const FIX = join(__dirname, '..', '__fixtures__');
 
@@ -106,5 +112,71 @@ describe('extractTurns (against captured thread/turns/list response)', () => {
   it('never falls back to JSON.stringify (= parser hit a known shape)', () => {
     const fallback = turns.find((t) => t.role === 'unknown');
     expect(fallback, 'parser fell back to dumping JSON for some item').toBeUndefined();
+  });
+});
+
+describe('decodeFileChanges', () => {
+  it('parses an array of {path, kind, diff, additions, deletions} entries', () => {
+    const out = decodeFileChanges([
+      {
+        path: 'src/users.service.ts',
+        kind: 'update',
+        diff: '+++ a/src/users.service.ts\n--- b/src/users.service.ts\n+new\n-old\n',
+        additions: 155,
+        deletions: 5,
+      },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      path: 'src/users.service.ts',
+      kind: 'update',
+      additions: 155,
+      deletions: 5,
+    });
+    expect(out[0].diff.length).toBeGreaterThan(0);
+  });
+
+  it('accepts an object map keyed by path (alternate bridge shape)', () => {
+    const out = decodeFileChanges({
+      'a.ts': { kind: 'add', diff: '+x', additions: 1, deletions: 0 },
+      'b.ts': { kind: 'update', diff: '-y\n+z', additions: 1, deletions: 1 },
+    });
+    expect(out.map((c) => c.path).sort()).toEqual(['a.ts', 'b.ts']);
+  });
+
+  it('falls back to snake_case fields and `unified_diff` / `patch` aliases', () => {
+    const out = decodeFileChanges([
+      { file_path: 'x.ts', action: 'add', unified_diff: '+a', lines_added: 1, lines_deleted: 0 },
+      { file: 'y.ts', kind: { type: 'delete' }, patch: '-z', deleted: 1 },
+    ]);
+    expect(out[0]).toMatchObject({ path: 'x.ts', kind: 'add', additions: 1, deletions: 0 });
+    expect(out[1]).toMatchObject({ path: 'y.ts', kind: 'delete', additions: 0, deletions: 1 });
+  });
+
+  it('infers totals by counting +/- lines when the bridge omits them', () => {
+    const out = decodeFileChanges([
+      {
+        path: 'z.ts',
+        diff: '--- a/z.ts\n+++ b/z.ts\n-old line\n+new line\n+another new line\n',
+      },
+    ]);
+    expect(out[0].additions).toBe(2);
+    expect(out[0].deletions).toBe(1);
+  });
+
+  it('drops entries with neither path nor diff', () => {
+    const out = decodeFileChanges([{ kind: 'update' }, { path: 'a.ts' }]);
+    expect(out.map((c) => c.path)).toEqual(['a.ts']);
+  });
+});
+
+describe('computeDiffTotals', () => {
+  it('ignores the +++ / --- file headers', () => {
+    const totals = computeDiffTotals('--- a/foo\n+++ b/foo\n-removed\n+added\n+added2\n');
+    expect(totals).toEqual({ additions: 2, deletions: 1 });
+  });
+
+  it('returns zeros for empty input', () => {
+    expect(computeDiffTotals('')).toEqual({ additions: 0, deletions: 0 });
   });
 });

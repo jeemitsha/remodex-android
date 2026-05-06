@@ -12,13 +12,17 @@
 // Driven entirely off the `turnIndex`, `phase`, and `toolKind` fields that
 // extract.ts now sets on each row. Pure function; tested with fixtures.
 
-import type { TurnMeta, TurnRow } from './protocol/extract';
+import type { FileChange, TurnMeta, TurnRow } from './protocol/extract';
 
 export type TurnDisplay = {
   id: string;
   userPrompts: TurnRow[];
   intermediate: IntermediateBlock[];
   finalAnswer: TurnRow | null;
+  // All file edits from every fileChange row in this turn, deduped by path
+  // (later edits to the same file shadow earlier ones). Drives the
+  // "N files changed +X -Y" summary card pinned at the bottom of the turn.
+  fileChanges: FileChange[];
   // Wall-clock duration of the entire turn (start → completion) when the
   // bridge supplied turn metadata. Falls back to `toolDurationMs` (the sum of
   // tool execution times) when wall-clock isn't available — that's a lower
@@ -162,11 +166,24 @@ function buildOne(rows: TurnRow[], turnIdx: number, meta?: TurnMeta): TurnDispla
     ? meta.durationMs
     : toolDurationMs;
 
+  // Aggregate every fileChange row's per-file edits into a single, dedup'd
+  // list — last edit to a path wins so the summary always reflects the
+  // turn's final state for that file.
+  const fileChangesByPath = new Map<string, FileChange>();
+  for (const r of rows) {
+    if (!r.fileChanges) continue;
+    for (const fc of r.fileChanges) {
+      fileChangesByPath.set(fc.path, fc);
+    }
+  }
+  const fileChanges = Array.from(fileChangesByPath.values());
+
   return {
     id: meta?.id ?? rows[0]?.id ?? `turn-${turnIdx}`,
     userPrompts,
     intermediate,
     finalAnswer,
+    fileChanges,
     totalDurationMs,
     toolDurationMs,
     status: meta?.status,

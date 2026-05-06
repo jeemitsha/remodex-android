@@ -20,7 +20,8 @@ import {
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import * as Clipboard from 'expo-clipboard';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -81,6 +82,7 @@ import {
   extractThreads,
   extractTurnMeta,
   extractTurns,
+  FileChange,
   ThreadRow,
   TurnMeta,
   TurnRow,
@@ -2426,6 +2428,8 @@ function TurnDisplayView({
         <WorkedForCard turn={turn} onApprove={onApprove} onReject={onReject} />
       ) : null}
       {turn.finalAnswer ? <MessageBubble turn={turn.finalAnswer} side="left" /> : null}
+      {turn.fileChanges.length > 0 ? <FileChangeSummaryCard fileChanges={turn.fileChanges} /> : null}
+      {turn.finalAnswer ? <AssistantMessageActions text={turn.finalAnswer.text} createdAt={turn.finalAnswer.createdAt} /> : null}
     </View>
   );
 }
@@ -2586,6 +2590,157 @@ function MessageBubble({ turn, side }: { turn: TurnRow; side: 'left' | 'right' }
       <Markdown style={markdownStyles}>{turn.text}</Markdown>
     </View>
   );
+}
+
+// End-of-turn file-change summary card. Mirrors iOS Codex's "N files changed
+// +X -Y" panel that sits below the assistant's final reply. Each row is
+// individually expandable into a fixed-height diff viewer; tapping the
+// expand-arrow grows the diff to its full content.
+function FileChangeSummaryCard({ fileChanges }: { fileChanges: FileChange[] }) {
+  const [open, setOpen] = useState(true);
+  const totals = useMemo(
+    () =>
+      fileChanges.reduce(
+        (acc, c) => ({
+          additions: acc.additions + c.additions,
+          deletions: acc.deletions + c.deletions,
+        }),
+        { additions: 0, deletions: 0 },
+      ),
+    [fileChanges],
+  );
+  const headerLabel = `${fileChanges.length} ${fileChanges.length === 1 ? 'file' : 'files'} changed`;
+
+  return (
+    <View style={styles.fcCard}>
+      <Pressable
+        onPress={() => setOpen((v) => !v)}
+        style={({ pressed }) => [styles.fcHeader, pressed && { opacity: 0.7 }]}>
+        <Text style={styles.fcHeaderTitle}>{headerLabel}</Text>
+        {totals.additions > 0 ? (
+          <Text style={styles.fcAdds}>+{totals.additions}</Text>
+        ) : null}
+        {totals.deletions > 0 ? (
+          <Text style={styles.fcDels}>-{totals.deletions}</Text>
+        ) : null}
+        <View style={{ flex: 1 }} />
+        <Text style={styles.fcHeaderChevron}>{open ? '▾' : '▸'}</Text>
+      </Pressable>
+      {open
+        ? fileChanges.map((c) => <FileChangeRow key={c.path} change={c} />)
+        : null}
+    </View>
+  );
+}
+
+function FileChangeRow({ change }: { change: FileChange }) {
+  const [open, setOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <View style={styles.fcRowWrap}>
+      <Pressable
+        onPress={() => setOpen((v) => !v)}
+        style={({ pressed }) => [styles.fcRow, pressed && { opacity: 0.7 }]}>
+        <Text style={styles.fcRowPath} numberOfLines={1}>{change.path}</Text>
+        {change.additions > 0 ? <Text style={styles.fcAdds}>+{change.additions}</Text> : null}
+        {change.deletions > 0 ? <Text style={styles.fcDels}>-{change.deletions}</Text> : null}
+        <Text style={styles.fcRowChevron}>{open ? '▾' : '▸'}</Text>
+      </Pressable>
+      {open ? (
+        change.diff ? (
+          <View style={styles.fcDiffBox}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ paddingHorizontal: 0 }}>
+              <ScrollView
+                style={[styles.fcDiffScroll, expanded ? styles.fcDiffScrollFull : null]}
+                showsVerticalScrollIndicator>
+                <DiffLines diff={change.diff} />
+              </ScrollView>
+            </ScrollView>
+            <Pressable
+              onPress={() => setExpanded((v) => !v)}
+              style={({ pressed }) => [styles.fcDiffExpand, pressed && { opacity: 0.6 }]}>
+              <Text style={styles.fcDiffExpandText}>{expanded ? 'Collapse ▴' : 'Expand ▾'}</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <Text style={styles.fcDiffEmpty}>No diff payload — bridge omitted patch text.</Text>
+        )
+      ) : null}
+    </View>
+  );
+}
+
+// Renders a unified-diff string with monospace + per-line +/- coloring.
+function DiffLines({ diff }: { diff: string }) {
+  const lines = diff.split(/\r?\n/);
+  return (
+    <View>
+      {lines.map((line, i) => {
+        let bg: string | null = null;
+        let fg: string = colors.fg70;
+        if (line.startsWith('+++') || line.startsWith('---')) {
+          fg = colors.fg45;
+        } else if (line.startsWith('+')) {
+          bg = 'rgba(75, 209, 145, 0.18)';
+          fg = '#9be3a8';
+        } else if (line.startsWith('-')) {
+          bg = 'rgba(255, 100, 100, 0.18)';
+          fg = '#ff8b8b';
+        } else if (line.startsWith('@@')) {
+          fg = colors.plan;
+        }
+        return (
+          <Text
+            key={i}
+            style={[styles.fcDiffLine, bg ? { backgroundColor: bg } : null, { color: fg }]}>
+            {line.length > 0 ? line : ' '}
+          </Text>
+        );
+      })}
+    </View>
+  );
+}
+
+function AssistantMessageActions({
+  text,
+  createdAt,
+}: {
+  text: string;
+  createdAt?: number;
+}) {
+  const [copied, setCopied] = useState(false);
+  const stamp = createdAt ? formatTimeOfDay(createdAt) : '';
+  return (
+    <View style={styles.msgActions}>
+      <Pressable
+        onPress={async () => {
+          try {
+            await Clipboard.setStringAsync(text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          } catch {
+            // ignore — clipboard rarely fails on RN
+          }
+        }}
+        hitSlop={8}
+        style={({ pressed }) => [styles.msgActionBtn, pressed && { opacity: 0.5 }]}>
+        <Icon name={copied ? 'checkmark' : 'copy'} size={13} color={colors.fg45} />
+      </Pressable>
+      {stamp ? <Text style={styles.msgActionTime}>{stamp}</Text> : null}
+    </View>
+  );
+}
+
+function formatTimeOfDay(epochMs: number): string {
+  const d = new Date(epochMs);
+  let hours = d.getHours();
+  const minutes = d.getMinutes();
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12 || 12;
+  return `${hours}:${minutes.toString().padStart(2, '0')} ${ampm}`;
 }
 
 function ToolGroupChild({ turn }: { turn: TurnRow }) {
@@ -3307,6 +3462,120 @@ const styles = StyleSheet.create({
   voiceSecondaryBtnText: {
     color: colors.fg,
     fontSize: fontSize.body,
+  },
+  // ---- file-change summary card ----
+  fcCard: {
+    marginTop: spacing.sm,
+    marginBottom: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.fg10,
+    borderRadius: radius.md,
+    overflow: 'hidden',
+  },
+  fcHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    backgroundColor: colors.fg6,
+  },
+  fcHeaderTitle: {
+    color: colors.fg,
+    fontSize: fontSize.subheadline,
+    fontWeight: weight.semibold,
+  },
+  fcHeaderChevron: {
+    color: colors.fg45,
+    fontSize: fontSize.subheadline,
+    width: 14,
+    textAlign: 'right',
+  },
+  fcAdds: {
+    color: '#9be3a8',
+    fontSize: fontSize.caption,
+    fontFamily: 'Menlo',
+  },
+  fcDels: {
+    color: '#ff8b8b',
+    fontSize: fontSize.caption,
+    fontFamily: 'Menlo',
+  },
+  fcRowWrap: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.fg10,
+  },
+  fcRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+  },
+  fcRowPath: {
+    flex: 1,
+    color: colors.plan,
+    fontSize: fontSize.subheadline,
+    fontFamily: 'Menlo',
+  },
+  fcRowChevron: {
+    color: colors.fg45,
+    fontSize: fontSize.subheadline,
+    width: 14,
+    textAlign: 'right',
+  },
+  fcDiffBox: {
+    backgroundColor: '#0d0d0d',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.fg10,
+  },
+  fcDiffScroll: {
+    maxHeight: 220,
+  },
+  fcDiffScrollFull: {
+    maxHeight: 700,
+  },
+  fcDiffLine: {
+    fontFamily: 'Menlo',
+    fontSize: 11,
+    paddingHorizontal: 10,
+    paddingVertical: 1,
+  },
+  fcDiffEmpty: {
+    color: colors.fg45,
+    fontSize: fontSize.caption,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    fontStyle: 'italic',
+  },
+  fcDiffExpand: {
+    paddingVertical: 6,
+    alignItems: 'center',
+    backgroundColor: colors.fg6,
+  },
+  fcDiffExpandText: {
+    color: colors.fg45,
+    fontSize: fontSize.caption,
+  },
+  // ---- per-message actions row (copy + timestamp) ----
+  msgActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: spacing.sm,
+    paddingTop: 4,
+    paddingBottom: spacing.sm,
+  },
+  msgActionBtn: {
+    width: 22,
+    height: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  msgActionTime: {
+    color: colors.fg45,
+    fontSize: fontSize.caption2,
+    fontFamily: 'Menlo',
   },
   loadOlderRow: {
     paddingVertical: spacing.md,
