@@ -17,6 +17,40 @@ Build a **production-quality, polished, third-party Android client** for the Rem
 
 ## Where we left off (most recent → oldest)
 
+### 2026-05-06 — night — sidebar 5-per-project + iOS-parity composer
+
+**Commits in this checkpoint** (newest first):
+- `f9d5ead` iOS-parity composer card (attachments preview, plus menu with photo-library / camera / plan-mode, model pill stub, context pill stub, mic stub, arrow-up send) — closes the `qrcode`-as-send bug from the prior session's "Next chunks #1"
+- `0318188` sidebar caps each project section at 5 threads with "Show all (N)" / "Show less" toggle (`applyGroupLimit` helper in `lib/sidebar.ts`)
+
+**State of UI now**:
+- Sidebar drawer: each project section shows the 5 most-recent threads + a `Show all (N)` row that toggles per-section expansion. Re-collapses with `Show less`. Per-section state stored in a `Set<groupKey>` so re-fetches don't lose it.
+- Composer: rounded card (radius 26, matches iOS) containing optional attachments preview row + multi-line TextInput + bottom bar `[+] [Default ▾] [Plan?] (spacer) [—] [mic] [↑]`. Send button = arrow-up in a filled dark circle.
+- "+" menu = bottom-sheet Modal with Plan toggle, Photo library, Take a photo (expo-image-picker — works in Expo Go).
+- Attachments stay local (preview only). Tapping the model pill / mic / context pill shows an Alert explaining the wire-up status.
+
+**Wired and working**:
+- Photo library picker (multi-select up to `MAX_ATTACHMENTS_PER_TURN = 8`) + camera capture, both with on-demand permission prompts.
+- Plan-mode armed/disarmed visible state.
+- Send button enables on either non-empty text OR ≥1 attachment.
+
+**Stubbed (need bridge protocol research before they're real)**:
+- **Model picker**: `runtime/list-models` JSON-RPC method not captured. Pill shows "Default" placeholder, tap → Alert.
+- **Context-window pill**: needs `context-window-usage` event capture from a live turn. Placeholder "—".
+- **Voice/mic**: needs the `GPTVoiceTranscriptionManager` channel reverse-engineered (referenced in iOS Codex `Services/`). Tap → Alert.
+- **Sending attachments to the bridge**: `input[]` payload shape for image attachments not in `Docs/PROTOCOL.md`. Today the picker just stores URIs in composer state; on send we strip them.
+
+**Test infra status**: 8 test files, **86** unit + fixture-backed tests, all green in ~300ms. New: `lib/sidebar.test.ts` +5 cases for `applyGroupLimit`; `lib/composer-state.test.ts` 12 cases for the reducer + predicates.
+
+**Next chunks** (in order, commit each):
+1. **Capture `runtime/list-models`** — extend `scripts/capture-fixtures.ts` to call this method (or whatever the bridge actually exposes — confirm by reading `phodex-bridge` + iOS `CodexService+RuntimeConfig.swift`), then wire the model pill to a real picker sheet matching iOS's "Effort / Change model / Speed" sections. Persist the selection in `Status.thread-ready.modelLabel`.
+2. **Capture context-window-usage** — find the JSON-RPC notification (likely `context/usage` or a field on `turn/started` / `turn/completed`), update `extract.ts` to surface it as `TurnMeta.contextUsage`, render it in the composer's ctx pill (token count + percent ring like iOS).
+3. **Image attachments end-to-end** — research the input shape (suspect `{ type: 'image', image: { dataUrl } }` or signed-URL upload), wire send + show server-side echo on a fresh turn.
+4. **Voice transcription** — read iOS `GPTVoiceTranscriptionManager.swift`, find the JSON-RPC method, add a tiny audio recorder (`expo-av`) + base64 upload.
+5. **Persistent identity for `npm run capture`** — saved phone identity cache so subsequent fixture runs don't need a fresh QR.
+6. **Component snapshot tests** — `@testing-library/react-native` snapshots for `Composer`, `WorkedForCard`, `ApprovalCard` against captured fixtures.
+7. **EAS dev build** — installable APK; drops Expo Go dependency; opens the door for `react-native-quick-crypto` if perf ever matters.
+
 ### 2026-05-06 — late evening — proper "Worked for" turn wrapper, wall-clock duration, precise format
 
 **Commits in this checkpoint** (newest first):
@@ -250,3 +284,4 @@ The capture script uses an ephemeral phone identity each run, so it doesn't poll
 - **2026-05-06 late afternoon**: swapped `pair.tsx` parsers to use `extract.ts`; rebuilt thread-detail UI as chat bubbles + command-execution cards; sidebar now shows preview + branch pill. Commit `cac2c4d`. Awaiting user phone validation.
 - **2026-05-06 evening**: chronological turn order fix; collapsible tool groups (lib/group-turns.ts); welcome+drawer layout pattern; react-native-markdown-display for assistant text; mcpToolCall extraction. Commit `2f063e2`. 57/57 tests.
 - **2026-05-06 late evening**: proper "Worked for X" turn wrapper (`lib/turn-display.ts`); per-turn structure with narration / commands-batch / mcp-pill / steered blocks; no-bubble assistant; uniform user bubble; tight bullet indent; removed top-only-back-arrow bar; wall-clock turn duration via `extractTurnMeta`; precise `Xh Xm Xs` formatter in `lib/format.ts`. 69/69 tests. Awaiting user phone validation.
+- **2026-05-06 night**: sidebar each-project-cap-5 + Show all toggle (`applyGroupLimit` in `lib/sidebar.ts`); iOS-parity composer card with attachments preview, plus-menu (photo library + camera via expo-image-picker, plan-mode toggle), model pill stub, context pill stub, mic stub, arrow-up send. Closes the qrcode-as-send bug. 86/86 tests. Commits `0318188`, `f9d5ead`. Awaiting user phone validation.
