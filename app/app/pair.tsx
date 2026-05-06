@@ -216,6 +216,12 @@ export default function PairScreen() {
   // macDeviceId is needed to key the threads cache. Captured once we know
   // the saved pairing or after a fresh QR pair.
   const macDeviceIdRef = useRef<string | null>(null);
+  // Used to scroll the chat to the newest message when a thread is freshly
+  // opened. After that, maintainVisibleContentPosition keeps the viewport
+  // anchored when older turns prepend at the top.
+  const turnsListRef = useRef<FlatList | null>(null);
+  const lastOpenedThreadRef = useRef<string | null>(null);
+  const needsScrollToBottomRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -494,6 +500,54 @@ export default function PairScreen() {
         ? new Set(extractThreads(archivedResp.result).map((t) => t.id))
         : new Set<string>();
       const threads = allThreads.filter((t) => !archivedIds.has(t.id));
+
+      if (__DEV__) {
+        // Diagnostic dump: helps figure out why the archive filter / Chats
+        // bucket aren't behaving as expected. Run with `npx expo start --lan`
+        // and watch the terminal that ran it.
+        console.log('[remodex/threads] active call returned', allThreads.length, 'threads');
+        console.log('[remodex/threads] archived call ok=', archivedResp.ok,
+          'count=', archivedIds.size);
+        console.log('[remodex/threads] after archive filter:', threads.length);
+        const sampleRaw = (listResp.result as any)?.data?.[0]
+          ?? (listResp.result as any)?.items?.[0]
+          ?? (listResp.result as any)?.threads?.[0];
+        if (sampleRaw) {
+          console.log('[remodex/threads] sample raw thread KEYS =', Object.keys(sampleRaw));
+          console.log('[remodex/threads] sample raw thread =', JSON.stringify(sampleRaw, null, 2));
+        }
+        const sampleArchivedRaw = archivedResp.ok
+          ? ((archivedResp.result as any)?.data?.[0]
+              ?? (archivedResp.result as any)?.items?.[0]
+              ?? (archivedResp.result as any)?.threads?.[0])
+          : null;
+        if (sampleArchivedRaw) {
+          console.log('[remodex/threads] sample ARCHIVED raw thread =',
+            JSON.stringify(sampleArchivedRaw, null, 2));
+        }
+        // Look for any field on every thread that could distinguish a chat
+        // (cwd alone might not — bridge might use `source`, `archivedAt`, etc.)
+        const fieldCounts = new Map<string, number>();
+        const rawArr = (listResp.result as any)?.data
+          ?? (listResp.result as any)?.items
+          ?? (listResp.result as any)?.threads
+          ?? [];
+        for (const t of rawArr) {
+          if (!t || typeof t !== 'object') continue;
+          for (const k of Object.keys(t)) {
+            fieldCounts.set(k, (fieldCounts.get(k) ?? 0) + 1);
+          }
+        }
+        console.log('[remodex/threads] field frequency:',
+          Array.from(fieldCounts.entries()).sort((a, b) => b[1] - a[1]));
+        console.log('[remodex/threads] cwd values (deduped):',
+          Array.from(new Set(allThreads.map((t) => t.cwd ?? '<missing>'))).slice(0, 20));
+        console.log('[remodex/threads] status values (deduped):',
+          Array.from(new Set(allThreads.map((t) => t.status ?? '<missing>'))));
+        console.log('[remodex/threads] source values (deduped):',
+          Array.from(new Set(allThreads.map((t) => (t as any).source ?? '<missing>'))));
+      }
+
       if (!cancelled) {
         setStatus({
           kind: 'sessions-ready',
@@ -1045,11 +1099,22 @@ export default function PairScreen() {
     });
   }
 
+  // Mark "needs scroll to bottom" the first time we land on a freshly-opened
+  // thread. The actual scroll happens in onContentSizeChange below.
+  if (status.kind === 'thread-ready' && status.thread.id !== lastOpenedThreadRef.current) {
+    lastOpenedThreadRef.current = status.thread.id;
+    needsScrollToBottomRef.current = true;
+  }
+
   // True while the bridge handshake / thread/list is still in flight. Drives
   // the thin top progress bar + the stale-while-revalidate welcome render
   // when we have on-disk cached threads to show.
+  // NOTE: `loading` is the initial state BEFORE we even read savedPairing —
+  // include it so the bar + cached sidebar both light up the moment the
+  // cache load finishes, even when the trusted-session resolve is slow.
   const isHydrating =
-    status.kind === 'connecting'
+    status.kind === 'loading'
+    || status.kind === 'connecting'
     || status.kind === 'paired'
     || status.kind === 'sessions-loading';
   const showCachedSidebar = isHydrating && cachedThreads !== null;
@@ -1058,7 +1123,7 @@ export default function PairScreen() {
     <View style={styles.root}>
       <TopProgressBar visible={isHydrating} />
 
-      {status.kind === 'loading' && <Centered>Loading identity…</Centered>}
+      {status.kind === 'loading' && !showCachedSidebar && <Centered>Loading identity…</Centered>}
 
       {status.kind === 'no-payload' && (
         <ScrollView contentContainerStyle={styles.body}>
@@ -1144,8 +1209,19 @@ export default function PairScreen() {
               behavior={Platform.OS === 'ios' ? 'padding' : undefined}
               keyboardVerticalOffset={0}>
               <FlatList
+                ref={turnsListRef}
                 data={buildTurnDisplays(status.turns, status.turnMeta)}
                 keyExtractor={(t, i) => t.id || `turn-${i}`}
+                // When older turns prepend at the top, keep the user's
+                // current visible item locked in place instead of letting
+                // the viewport jump.
+                maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+                onContentSizeChange={() => {
+                  if (needsScrollToBottomRef.current) {
+                    needsScrollToBottomRef.current = false;
+                    turnsListRef.current?.scrollToEnd({ animated: false });
+                  }
+                }}
                 ListEmptyComponent={
                   <View style={styles.empty}>
                     <Text style={styles.body50}>This thread has no turns yet.</Text>
@@ -2214,19 +2290,22 @@ function VoiceRecorderModal({
   );
 }
 
-// Thin indeterminate progress bar pinned to the top of the viewport. Shown
-// while we're in "stale-while-revalidate" mode — i.e. the sidebar is rendered
-// from on-disk cache and the bridge handshake / thread/list is still in flight.
-// 2px tall, slides a 30%-wide highlight strip left → right repeatedly.
+// Thin indeterminate progress bar pinned to the absolute top of the viewport.
+// Shown while we're in "stale-while-revalidate" mode — the sidebar is rendered
+// from on-disk cache and the bridge handshake / thread/list is still in
+// flight. 3px tall full-width track with a 30%-wide highlight strip sliding
+// left → right repeatedly.
 function TopProgressBar({ visible }: { visible: boolean }) {
-  const slide = useRef(new Animated.Value(0)).current;
+  const screenW = Dimensions.get('window').width;
+  const stripW = Math.round(screenW * 0.3);
+  const slide = useRef(new Animated.Value(-stripW)).current;
 
   useEffect(() => {
     if (!visible) return;
-    slide.setValue(0);
+    slide.setValue(-stripW);
     const loop = Animated.loop(
       Animated.timing(slide, {
-        toValue: 1,
+        toValue: screenW,
         duration: 1200,
         useNativeDriver: true,
       }),
@@ -2235,7 +2314,7 @@ function TopProgressBar({ visible }: { visible: boolean }) {
     return () => {
       loop.stop();
     };
-  }, [visible, slide]);
+  }, [visible, slide, screenW, stripW]);
 
   if (!visible) return null;
 
@@ -2244,16 +2323,7 @@ function TopProgressBar({ visible }: { visible: boolean }) {
       <Animated.View
         style={[
           styles.topProgressFill,
-          {
-            transform: [
-              {
-                translateX: slide.interpolate({
-                  inputRange: [0, 1],
-                  outputRange: ['-100%', '350%'],
-                }),
-              },
-            ],
-          },
+          { width: stripW, transform: [{ translateX: slide }] },
         ]}
       />
     </View>
@@ -3242,7 +3312,6 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 0,
     bottom: 0,
-    width: '30%',
     backgroundColor: colors.plan,
   },
   approvalCard: {
