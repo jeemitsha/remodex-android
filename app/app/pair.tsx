@@ -233,6 +233,14 @@ const STAGE_LABEL: Record<HandshakeStage | 'opening' | 'connected', string> = {
 
 export default function PairScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  // Keyboard handling lives here at the screen level so the outer chat
+  // container can shrink alongside (FlatList + Composer reflow naturally).
+  // The Composer itself only knows about safe-area inset, no keyboard.
+  const keyboardHeight = useKeyboardHeight();
+  // Subtract the bottom safe-area inset because the keyboard, when up,
+  // covers the gesture-nav area too — otherwise we'd double-count.
+  const keyboardPad = keyboardHeight > 0 ? Math.max(0, keyboardHeight - insets.bottom) : 0;
   const [status, setStatus] = useState<Status>({ kind: 'loading' });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // Models are loaded once after `initialize` and stay valid for the whole
@@ -1213,14 +1221,9 @@ export default function PairScreen() {
       )}
 
       {(status.kind === 'thread-loading' || status.kind === 'thread-ready' || status.kind === 'thread-error') && (
-        <View style={{ flex: 1 }}>
+        <View style={{ flex: 1, paddingBottom: keyboardPad }}>
           <ThreadHeader thread={status.thread} onMenu={() => setSidebarOpen(true)} />
-          {status.kind === 'thread-loading' && (
-            <View style={styles.row}>
-              <ActivityIndicator color={colors.plan} />
-              <Text style={styles.body50}>Loading turns…</Text>
-            </View>
-          )}
+          {status.kind === 'thread-loading' && <ThreadLoadingSkeleton />}
           {status.kind === 'thread-error' && (
             <View style={styles.body}>
               <Text style={[styles.title, { color: '#ff8b8b' }]}>Couldn't load turns</Text>
@@ -1809,12 +1812,10 @@ function Composer({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [recorderOpen, setRecorderOpen] = useState(false);
   const insets = useSafeAreaInsets();
-  const keyboardHeight = useKeyboardHeight();
-  // When the keyboard is up, push the composer above it. Otherwise leave the
-  // bottom safe-area inset (gesture nav) intact. spacing.sm is the floor
-  // for devices that report 0 inset (most physical-button phones).
-  const composerBottomPad =
-    keyboardHeight > 0 ? keyboardHeight : Math.max(insets.bottom, spacing.sm);
+  // Composer always pads by the bottom safe-area inset (gesture nav). Keyboard
+  // handling is done at the parent layer so the FlatList shrinks alongside —
+  // see paddingBottom on the chat container in the screen render block.
+  const composerBottomPad = Math.max(insets.bottom, spacing.sm);
   const sendable = isComposerSendable({
     ...INITIAL_COMPOSER_STATE,
     text,
@@ -2749,31 +2750,61 @@ function FileChangeRow({ change }: { change: FileChange }) {
   );
 }
 
-// Renders a unified-diff string with monospace + per-line +/- coloring.
+// Renders a unified diff with a clear gutter and per-line +/- coloring.
+// Layout per line:
+//   [3px colored bar] [12px +/- gutter char] [line content (prefix-stripped)]
+// Hunk headers (@@ -10,3 +10,6 @@) get a full-width blue band.
+// File-header lines (--- a/foo, +++ b/foo) are dimmed metadata.
 function DiffLines({ diff }: { diff: string }) {
   const lines = diff.split(/\r?\n/);
   return (
     <View>
       {lines.map((line, i) => {
-        let bg: string | null = null;
-        let fg: string = colors.fg70;
-        if (line.startsWith('+++') || line.startsWith('---')) {
-          fg = colors.fg45;
-        } else if (line.startsWith('+')) {
-          bg = 'rgba(75, 209, 145, 0.18)';
-          fg = '#9be3a8';
-        } else if (line.startsWith('-')) {
-          bg = 'rgba(255, 100, 100, 0.18)';
-          fg = '#ff8b8b';
-        } else if (line.startsWith('@@')) {
-          fg = colors.plan;
+        if (!line) {
+          return <View key={i} style={styles.diffLineEmpty} />;
         }
+        if (line.startsWith('+++') || line.startsWith('---')) {
+          // File header — keep visible but dimmed; no marker bar.
+          return (
+            <Text key={i} style={styles.diffMeta} selectable>
+              {line}
+            </Text>
+          );
+        }
+        if (line.startsWith('@@')) {
+          return (
+            <View key={i} style={styles.diffHunk}>
+              <Text style={styles.diffHunkText} selectable>
+                {line}
+              </Text>
+            </View>
+          );
+        }
+        const isAdd = line.startsWith('+');
+        const isDel = line.startsWith('-');
+        const content = isAdd || isDel ? line.slice(1) : line.slice(line.startsWith(' ') ? 1 : 0);
+        const rowStyle =
+          isAdd ? styles.diffRowAdd
+          : isDel ? styles.diffRowDel
+          : styles.diffRowCtx;
+        const barStyle =
+          isAdd ? styles.diffBarAdd
+          : isDel ? styles.diffBarDel
+          : null;
+        const fg =
+          isAdd ? '#a8e8b8'
+          : isDel ? '#ff9f9f'
+          : colors.fg70;
         return (
-          <Text
-            key={i}
-            style={[styles.fcDiffLine, bg ? { backgroundColor: bg } : null, { color: fg }]}>
-            {line.length > 0 ? line : ' '}
-          </Text>
+          <View key={i} style={[styles.diffRow, rowStyle]}>
+            <View style={[styles.diffBar, barStyle]} />
+            <Text style={[styles.diffMarker, { color: fg }]} selectable>
+              {isAdd ? '+' : isDel ? '-' : ' '}
+            </Text>
+            <Text style={[styles.diffLineText, { color: fg }]} selectable>
+              {content || ' '}
+            </Text>
+          </View>
         );
       })}
     </View>
@@ -3077,6 +3108,37 @@ function Centered({ children }: { children: React.ReactNode }) {
   return (
     <View style={styles.centered}>
       <Text style={styles.centeredText}>{children}</Text>
+    </View>
+  );
+}
+
+// Shown while a thread is loading. Three pulsing message-bubble placeholders
+// (user prompt right, assistant block left, another short user prompt) so the
+// chat area never looks blank — feels like content is "almost there" instead
+// of just spinning. Pulse is a single Animated.loop on opacity.
+function ThreadLoadingSkeleton() {
+  const pulse = useRef(new Animated.Value(0.35)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 0.7, duration: 700, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0.35, duration: 700, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse]);
+
+  return (
+    <View style={styles.skeletonRoot}>
+      <Animated.View style={[styles.skelUser, { opacity: pulse, width: '55%' }]} />
+      <Animated.View style={[styles.skelMeta, { opacity: pulse, width: '38%' }]} />
+      <Animated.View style={[styles.skelAssistant, { opacity: pulse, width: '92%' }]} />
+      <Animated.View style={[styles.skelAssistant, { opacity: pulse, width: '78%' }]} />
+      <Animated.View style={[styles.skelAssistant, { opacity: pulse, width: '85%' }]} />
+      <Animated.View style={[styles.skelUser, { opacity: pulse, width: '40%' }]} />
+      <Animated.View style={[styles.skelAssistant, { opacity: pulse, width: '95%' }]} />
+      <Animated.View style={[styles.skelAssistant, { opacity: pulse, width: '70%' }]} />
     </View>
   );
 }
@@ -3674,11 +3736,55 @@ const styles = StyleSheet.create({
   fcDiffScrollFull: {
     maxHeight: 700,
   },
-  fcDiffLine: {
+  diffRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    minHeight: 16,
+  },
+  diffRowCtx: {},
+  diffRowAdd: { backgroundColor: 'rgba(75, 209, 145, 0.10)' },
+  diffRowDel: { backgroundColor: 'rgba(255, 100, 100, 0.10)' },
+  diffBar: {
+    width: 3,
+    backgroundColor: 'transparent',
+  },
+  diffBarAdd: { backgroundColor: '#4bd191' },
+  diffBarDel: { backgroundColor: '#ff6464' },
+  diffMarker: {
     fontFamily: 'Menlo',
     fontSize: 11,
+    width: 16,
+    textAlign: 'center',
+    paddingTop: 1,
+  },
+  diffLineText: {
+    fontFamily: 'Menlo',
+    fontSize: 11,
+    paddingRight: 12,
+    paddingVertical: 1,
+  },
+  diffLineEmpty: {
+    height: 14,
+  },
+  diffMeta: {
+    fontFamily: 'Menlo',
+    fontSize: 11,
+    color: colors.fg40,
     paddingHorizontal: 10,
     paddingVertical: 1,
+  },
+  diffHunk: {
+    backgroundColor: 'rgba(80, 130, 230, 0.12)',
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(80, 130, 230, 0.25)',
+  },
+  diffHunkText: {
+    fontFamily: 'Menlo',
+    fontSize: 11,
+    color: '#7fa8ff',
   },
   fcDiffEmpty: {
     color: colors.fg45,
@@ -3730,6 +3836,33 @@ const styles = StyleSheet.create({
     color: colors.fg45,
     fontSize: fontSize.caption2,
     fontFamily: 'Menlo',
+  },
+  skeletonRoot: {
+    flex: 1,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.lg,
+    gap: 10,
+  },
+  skelUser: {
+    height: 16,
+    backgroundColor: colors.plan,
+    opacity: 0.5,
+    alignSelf: 'flex-end',
+    borderRadius: 8,
+    marginVertical: 6,
+  },
+  skelAssistant: {
+    height: 14,
+    backgroundColor: colors.fg10,
+    alignSelf: 'flex-start',
+    borderRadius: 7,
+  },
+  skelMeta: {
+    height: 12,
+    backgroundColor: colors.fg6,
+    alignSelf: 'flex-start',
+    borderRadius: 6,
+    marginBottom: 6,
   },
   loadOlderRow: {
     paddingVertical: spacing.md,
