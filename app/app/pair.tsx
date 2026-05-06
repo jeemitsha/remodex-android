@@ -40,6 +40,7 @@ import {
   PairingContext,
   SecureSession,
 } from '@/lib/protocol/secureTransport';
+import { resolveTrustedSession } from '@/lib/protocol/trustedSessionResolve';
 import { pendingPairing } from '@/lib/state/pendingPairing';
 import {
   clearSavedPairing,
@@ -148,13 +149,78 @@ export default function PairScreen() {
       if (!pairing) {
         const saved = await loadSavedPairing();
         if (saved) {
-          pairing = {
+          // Always ask the relay for the *current* sessionId for this trusted
+          // Mac before connecting. The saved sessionId is from a previous
+          // bridge-up invocation and is almost certainly stale by now.
+          if (!cancelled) setStatus({ kind: 'connecting', stage: 'opening' });
+          let identityForResolve: PhoneIdentity;
+          try {
+            identityForResolve = await loadOrCreatePhoneIdentity();
+          } catch (e) {
+            if (!cancelled) {
+              setStatus({
+                kind: 'error',
+                message: `Failed to load phone identity: ${(e as Error).message}`,
+                canRetry: true,
+              });
+            }
+            return;
+          }
+          if (cancelled) return;
+
+          const resolved = await resolveTrustedSession({
             relay: saved.relay,
-            sessionId: saved.sessionId,
             macDeviceId: saved.macDeviceId,
-            macIdentityPublicKey: saved.macIdentityPublicKey,
-          };
-          mode = 'trusted_reconnect';
+            identity: identityForResolve,
+          });
+
+          if (cancelled) return;
+
+          if (resolved.ok) {
+            pairing = {
+              relay: saved.relay,
+              sessionId: resolved.resolved.sessionId,
+              macDeviceId: resolved.resolved.macDeviceId,
+              macIdentityPublicKey: resolved.resolved.macIdentityPublicKey,
+            };
+            mode = 'trusted_reconnect';
+            // Refresh saved pairing with the new sessionId so subsequent attempts
+            // (rare, since we re-resolve each launch anyway) start from the freshest data.
+            void saveSavedPairing({
+              relay: saved.relay,
+              sessionId: resolved.resolved.sessionId,
+              macDeviceId: resolved.resolved.macDeviceId,
+              macIdentityPublicKey: resolved.resolved.macIdentityPublicKey,
+            });
+          } else if (resolved.error.kind === 'mac_offline') {
+            setStatus({
+              kind: 'error',
+              message: 'Your trusted Mac appears to be offline. Start `remodex up` and re-open the app.',
+              code: 'mac_offline',
+              canRetry: true,
+            });
+            return;
+          } else if (resolved.error.kind === 'phone_not_trusted') {
+            // Trust was wiped (e.g. someone ran `remodex reset-pairing`). Force re-pair.
+            await clearSavedPairing();
+            setStatus({
+              kind: 'error',
+              message: 'This phone is no longer trusted by the Mac. Re-pair to continue.',
+              code: 'phone_not_trusted',
+              canRetry: true,
+            });
+            return;
+          } else {
+            // network / invalid_response / unsupported_relay → try with the
+            // saved (possibly stale) sessionId; the bridge will tell us if it's stale.
+            pairing = {
+              relay: saved.relay,
+              sessionId: saved.sessionId,
+              macDeviceId: saved.macDeviceId,
+              macIdentityPublicKey: saved.macIdentityPublicKey,
+            };
+            mode = 'trusted_reconnect';
+          }
         }
       }
 
