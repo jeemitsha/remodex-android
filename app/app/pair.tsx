@@ -234,13 +234,15 @@ const STAGE_LABEL: Record<HandshakeStage | 'opening' | 'connected', string> = {
 export default function PairScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  // Keyboard handling lives here at the screen level so the outer chat
-  // container can shrink alongside (FlatList + Composer reflow naturally).
-  // The Composer itself only knows about safe-area inset, no keyboard.
   const keyboardHeight = useKeyboardHeight();
-  // Subtract the bottom safe-area inset because the keyboard, when up,
-  // covers the gesture-nav area too — otherwise we'd double-count.
-  const keyboardPad = keyboardHeight > 0 ? Math.max(0, keyboardHeight - insets.bottom) : 0;
+  // Single source of truth for the outer chat container's bottom padding:
+  //   - keyboard up → use its full height (it covers the gesture-nav area)
+  //   - keyboard closed → use the bottom safe-area inset
+  // The Composer doesn't add its own bottom padding anymore — that was
+  // double-counting, since RN 0.81 + edge-to-edge has insets.bottom GROW
+  // when the keyboard opens (IME is included), so adding it inside the
+  // composer made the composer "fly up" by an extra keyboardHeight.
+  const chatBottomPad = keyboardHeight > 0 ? keyboardHeight : insets.bottom;
   const [status, setStatus] = useState<Status>({ kind: 'loading' });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // Models are loaded once after `initialize` and stay valid for the whole
@@ -1246,7 +1248,7 @@ export default function PairScreen() {
       )}
 
       {(status.kind === 'thread-loading' || status.kind === 'thread-ready' || status.kind === 'thread-error') && (
-        <View style={{ flex: 1, paddingBottom: keyboardPad }}>
+        <View style={{ flex: 1, paddingBottom: chatBottomPad }}>
           <ThreadHeader thread={status.thread} onMenu={() => setSidebarOpen(true)} />
           {status.kind === 'thread-loading' && <ThreadLoadingSkeleton />}
           {status.kind === 'thread-error' && (
@@ -1836,11 +1838,11 @@ function Composer({
   const [plusOpen, setPlusOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [recorderOpen, setRecorderOpen] = useState(false);
-  const insets = useSafeAreaInsets();
-  // Composer always pads by the bottom safe-area inset (gesture nav). Keyboard
-  // handling is done at the parent layer so the FlatList shrinks alongside —
-  // see paddingBottom on the chat container in the screen render block.
-  const composerBottomPad = Math.max(insets.bottom, spacing.sm);
+  // Composer no longer reads insets.bottom itself. The OUTER chat container
+  // (PairScreen.chatBottomPad) handles all bottom-edge logic — safe-area when
+  // the keyboard's down, keyboard height when it's up. We only keep a tiny
+  // breathing-room pad so the card doesn't sit pixel-flush against the edge.
+  const composerBottomPad = spacing.sm;
   const sendable = isComposerSendable({
     ...INITIAL_COMPOSER_STATE,
     text,
