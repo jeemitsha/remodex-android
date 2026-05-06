@@ -51,28 +51,9 @@ import {
 } from '@/lib/state/savedPairing';
 import { colors, fontSize, radius, spacing, weight } from '@/lib/theme/tokens';
 
-type ThreadRow = {
-  id: string;
-  title?: string;
-  status?: string;
-  cwd?: string;
-  updatedAt?: number | string;
-};
-
-type TurnRow = {
-  id: string;
-  role: 'user' | 'assistant' | 'system' | 'tool' | 'approval' | 'unknown';
-  text: string;
-  status?: string;
-  createdAt?: number | string;
-  raw: unknown; // for debug rendering when nothing else parses
-  // Only present when role === 'approval':
-  approvalRequestId?: number | string;
-  approvalMethod?: string;
-  approvalCommand?: string;
-  approvalReason?: string;
-  approvalDecision?: 'accept' | 'reject';
-};
+// Thread/turn types and parsers live in lib/protocol/extract.ts so they can be
+// fixture-tested. Keep the imports here narrow.
+import { extractThreads, extractTurns, ThreadRow, TurnRow } from '@/lib/protocol/extract';
 
 type Status =
   | { kind: 'loading' }
@@ -843,6 +824,7 @@ function PairedHeader({ session, mode }: { session: SecureSession; mode: Handsha
 function ThreadRowView({ thread }: { thread: ThreadRow }) {
   const dotColor = statusColor(thread.status);
   const timing = relativeTime(thread.updatedAt);
+  const subtitle = thread.preview || (thread.branch ? `${thread.branch}` : '');
   return (
     <View style={styles.threadRow}>
       <View style={styles.threadDotSlot}>
@@ -852,12 +834,20 @@ function ThreadRowView({ thread }: { thread: ThreadRow }) {
         <Text style={styles.threadTitle} numberOfLines={1}>
           {thread.title || thread.id}
         </Text>
-        {thread.status && thread.status !== 'completed' && thread.status !== 'idle' ? (
+        {subtitle ? (
           <Text style={styles.threadSub} numberOfLines={1}>
-            {thread.status}
+            {subtitle}
           </Text>
         ) : null}
       </View>
+      {thread.branch ? (
+        <View style={styles.threadBranchPill}>
+          <Icon name="arrow.triangle.branch" size={10} color={colors.fg50} />
+          <Text style={styles.threadBranchText} numberOfLines={1}>
+            {thread.branch}
+          </Text>
+        </View>
+      ) : null}
       {timing ? <Text style={styles.threadTiming}>{timing}</Text> : null}
     </View>
   );
@@ -925,13 +915,6 @@ function Composer({
   );
 }
 
-function pickString(...candidates: unknown[]): string {
-  for (const c of candidates) {
-    if (typeof c === 'string' && c.trim()) return c;
-  }
-  return '';
-}
-
 function TurnView({
   turn,
   onApprove,
@@ -941,21 +924,182 @@ function TurnView({
   onApprove?: (turn: TurnRow) => void;
   onReject?: (turn: TurnRow) => void;
 }) {
-  if (turn.role === 'approval') {
-    return <ApprovalCard turn={turn} onApprove={onApprove} onReject={onReject} />;
+  switch (turn.role) {
+    case 'approval':
+      return <ApprovalCard turn={turn} onApprove={onApprove} onReject={onReject} />;
+    case 'tool':
+      return <CommandCard turn={turn} />;
+    case 'user':
+      return <MessageBubble turn={turn} side="right" />;
+    case 'assistant':
+      return <MessageBubble turn={turn} side="left" />;
+    case 'system':
+      return <SystemRow turn={turn} />;
+    default:
+      return <SystemRow turn={turn} />;
   }
-  const isUser = turn.role === 'user';
-  const isAssistant = turn.role === 'assistant';
+}
+
+function MessageBubble({ turn, side }: { turn: TurnRow; side: 'left' | 'right' }) {
+  const blocks = parseMarkdownBlocks(turn.text);
   return (
-    <View style={[styles.turnRow, isUser && styles.turnRowUser]}>
-      <Text style={[styles.turnRoleLabel, isUser && { color: colors.plan }]}>
-        {turn.role}
-      </Text>
-      <Text style={[styles.turnText, isAssistant && { color: colors.fg }]}>
-        {turn.text || '(empty)'}
+    <View style={[styles.bubbleRow, side === 'right' ? styles.bubbleRowRight : styles.bubbleRowLeft]}>
+      <View style={[styles.bubble, side === 'right' ? styles.bubbleUser : styles.bubbleAssistant]}>
+        {blocks.map((b, i) =>
+          b.type === 'code' ? (
+            <CodeBlock key={i} language={b.language} text={b.text} />
+          ) : (
+            <Text key={i} style={[styles.bubbleText, side === 'right' && styles.bubbleTextUser]}>
+              {b.text}
+            </Text>
+          ),
+        )}
+      </View>
+    </View>
+  );
+}
+
+function CodeBlock({ language, text }: { language?: string; text: string }) {
+  return (
+    <View style={styles.codeBlock}>
+      {language ? <Text style={styles.codeBlockLang}>{language}</Text> : null}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{ paddingRight: spacing.md }}>
+        <Text style={styles.codeBlockText}>{text}</Text>
+      </ScrollView>
+    </View>
+  );
+}
+
+function CommandCard({ turn }: { turn: TurnRow }) {
+  const exitOk = turn.exitCode === undefined ? null : turn.exitCode === 0;
+  const statusLabel = turn.toolStatus || (exitOk === true ? 'completed' : exitOk === false ? 'failed' : 'pending');
+  const duration = turn.durationMs ? formatDuration(turn.durationMs) : '';
+
+  return (
+    <View style={styles.cmdCard}>
+      <View style={styles.cmdHeader}>
+        <View style={styles.cmdHeaderLeft}>
+          <Icon name="terminal" size={12} color={colors.fg50} />
+          <Text style={styles.cmdHeaderLabel}>{cmdHeaderLabel(turn)}</Text>
+        </View>
+        <View style={styles.cmdHeaderRight}>
+          {duration ? <Text style={styles.cmdMetaText}>{duration}</Text> : null}
+          <Text
+            style={[
+              styles.cmdStatusPill,
+              exitOk === true
+                ? { color: '#9be39a', backgroundColor: 'rgba(155,227,154,0.12)' }
+                : exitOk === false
+                  ? { color: '#ff8b8b', backgroundColor: 'rgba(255,139,139,0.12)' }
+                  : { color: colors.fg50, backgroundColor: colors.fg10 },
+            ]}>
+            {exitOk === true ? `✓ ${statusLabel}` : exitOk === false ? `✕ exit ${turn.exitCode}` : statusLabel}
+          </Text>
+        </View>
+      </View>
+      {turn.command ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ paddingRight: spacing.md }}>
+          <Text style={styles.cmdCommand}>{`$ ${turn.command}`}</Text>
+        </ScrollView>
+      ) : null}
+      {turn.output ? <CommandOutput text={turn.output} /> : null}
+    </View>
+  );
+}
+
+function CommandOutput({ text }: { text: string }) {
+  const lines = text.split('\n');
+  const isLong = lines.length > 8;
+  const [expanded, setExpanded] = useState(false);
+  const visible = !isLong || expanded ? text : lines.slice(0, 8).join('\n');
+  return (
+    <View style={styles.cmdOutputWrap}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{ paddingRight: spacing.md }}>
+        <Text style={styles.cmdOutputText}>{visible}</Text>
+      </ScrollView>
+      {isLong ? (
+        <Pressable onPress={() => setExpanded((e) => !e)} hitSlop={8}>
+          <Text style={styles.cmdExpand}>
+            {expanded ? 'Show less' : `Show ${lines.length - 8} more lines`}
+          </Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+function SystemRow({ turn }: { turn: TurnRow }) {
+  return (
+    <View style={styles.systemRow}>
+      <Text style={styles.systemRowLabel}>{turn.role === 'unknown' ? 'item' : turn.role}</Text>
+      <Text style={styles.systemRowText} numberOfLines={6}>
+        {turn.text}
       </Text>
     </View>
   );
+}
+
+function cmdHeaderLabel(turn: TurnRow): string {
+  if (turn.cwd) {
+    const base = turn.cwd.split('/').filter(Boolean).pop() || turn.cwd;
+    return base;
+  }
+  return 'shell';
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)}s`;
+  return `${Math.round(s / 60)}m`;
+}
+
+// Minimal markdown-ish split: extracts ```fenced``` code blocks with optional
+// language tag, leaves everything else as plain text. Real markdown rendering
+// (lists, bold, headings, inline code) is a later pass — we'd add
+// react-native-markdown-display once we accept the bundle-size hit.
+type MarkdownBlock = { type: 'text'; text: string } | { type: 'code'; language?: string; text: string };
+function parseMarkdownBlocks(input: string): MarkdownBlock[] {
+  const blocks: MarkdownBlock[] = [];
+  const lines = input.split('\n');
+  let i = 0;
+  let buffer: string[] = [];
+  const flushText = () => {
+    if (buffer.length === 0) return;
+    const text = buffer.join('\n').trim();
+    if (text) blocks.push({ type: 'text', text });
+    buffer = [];
+  };
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = line.match(/^```(\w+)?\s*$/);
+    if (fence) {
+      flushText();
+      const language = fence[1];
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      blocks.push({ type: 'code', language, text: codeLines.join('\n') });
+      i++; // skip closing fence
+      continue;
+    }
+    buffer.push(line);
+    i++;
+  }
+  flushText();
+  return blocks.length > 0 ? blocks : [{ type: 'text', text: input }];
 }
 
 function ApprovalCard({
@@ -1010,128 +1154,13 @@ function approvalKindLabel(method: string): string {
   return method || 'Approval requested';
 }
 
-function extractTurns(result: unknown): TurnRow[] {
-  if (!result || typeof result !== 'object') return [];
-  const obj = result as Record<string, unknown>;
-  const list =
-    (Array.isArray(obj.data) && (obj.data as unknown[]))
-    || (Array.isArray(obj.items) && (obj.items as unknown[]))
-    || (Array.isArray(obj.turns) && (obj.turns as unknown[]))
-    || [];
-
-  const rows: TurnRow[] = [];
-  for (const t of list) {
-    if (!t || typeof t !== 'object') continue;
-    const turn = t as Record<string, unknown>;
-    const id =
-      typeof turn.id === 'string'
-        ? turn.id
-        : typeof turn.turnId === 'string'
-          ? (turn.turnId as string)
-          : '';
-
-    // A "turn" packs both the user input and the assistant's reply together.
-    // Render them as two stacked rows so the chat UI reads top-to-bottom.
-    const userText = pickText(
-      turn.userInput,
-      turn.input,
-      turn.prompt,
-      turn.userMessage,
-      turn.user,
-    );
-    const assistantText = pickText(
-      turn.assistantOutput,
-      turn.output,
-      turn.response,
-      turn.assistantMessage,
-      turn.assistant,
-      turn.text,
-    );
-
-    if (userText) {
-      rows.push({
-        id: `${id}:user`,
-        role: 'user',
-        text: userText,
-        status: typeof turn.status === 'string' ? turn.status : undefined,
-        createdAt:
-          typeof turn.createdAt === 'number' || typeof turn.createdAt === 'string'
-            ? (turn.createdAt as number | string)
-            : undefined,
-        raw: turn,
-      });
-    }
-    if (assistantText) {
-      rows.push({
-        id: `${id}:assistant`,
-        role: 'assistant',
-        text: assistantText,
-        status: typeof turn.status === 'string' ? turn.status : undefined,
-        createdAt:
-          typeof turn.completedAt === 'number' || typeof turn.completedAt === 'string'
-            ? (turn.completedAt as number | string)
-            : undefined,
-        raw: turn,
-      });
-    }
-    if (!userText && !assistantText) {
-      // Fallback: dump JSON so we can iterate on the parser.
-      rows.push({
-        id: id || `unknown-${rows.length}`,
-        role: 'unknown',
-        text: JSON.stringify(turn).slice(0, 4000),
-        raw: turn,
-      });
-    }
-  }
-  return rows;
-}
-
-function pickText(...candidates: unknown[]): string {
+// Small local helper retained for pickString-of-arbitrary-unknowns inside
+// notification/approval handlers.
+function pickString(...candidates: unknown[]): string {
   for (const c of candidates) {
     if (typeof c === 'string' && c.trim()) return c;
-    if (Array.isArray(c)) {
-      // Some shapes nest content as an array of {type, text} chunks (Codex/Claude style).
-      const joined = c
-        .map((part) => {
-          if (typeof part === 'string') return part;
-          if (part && typeof part === 'object' && typeof (part as any).text === 'string') {
-            return (part as any).text;
-          }
-          return '';
-        })
-        .filter(Boolean)
-        .join('\n');
-      if (joined.trim()) return joined;
-    }
-    if (c && typeof c === 'object' && typeof (c as any).text === 'string') {
-      return (c as any).text;
-    }
   }
   return '';
-}
-
-function extractThreads(result: unknown): ThreadRow[] {
-  if (!result || typeof result !== 'object') return [];
-  const obj = result as Record<string, unknown>;
-  const list =
-    (Array.isArray(obj.data) && (obj.data as unknown[]))
-    || (Array.isArray(obj.items) && (obj.items as unknown[]))
-    || (Array.isArray(obj.threads) && (obj.threads as unknown[]))
-    || [];
-  return list
-    .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
-    .map<ThreadRow>((t) => ({
-      id: typeof t.id === 'string' ? t.id : typeof t.threadId === 'string' ? t.threadId : '',
-      title: typeof t.title === 'string' ? t.title : typeof t.name === 'string' ? t.name : undefined,
-      status: typeof t.status === 'string' ? t.status : undefined,
-      cwd: typeof t.cwd === 'string' ? t.cwd : undefined,
-      updatedAt:
-        typeof t.updatedAt === 'number' || typeof t.updatedAt === 'string'
-          ? (t.updatedAt as number | string)
-          : undefined,
-    }))
-    .filter((t) => t.id);
 }
 
 function Centered({ children }: { children: React.ReactNode }) {
@@ -1252,6 +1281,21 @@ const styles = StyleSheet.create({
   threadTitle: { color: colors.fg, fontSize: fontSize.body, fontWeight: weight.regular },
   threadSub: { color: colors.fg45, fontSize: fontSize.caption, marginTop: 2 },
   threadTiming: { color: colors.fg45, fontSize: fontSize.footnote, fontFamily: 'Menlo' },
+  threadBranchPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    backgroundColor: colors.fg6,
+    borderRadius: radius.sm,
+    maxWidth: 100,
+  },
+  threadBranchText: {
+    color: colors.fg50,
+    fontSize: fontSize.caption2,
+    fontFamily: 'Menlo',
+  },
   empty: { paddingVertical: spacing.xxl, alignItems: 'center' },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xxl },
   centeredText: { color: colors.fg, fontSize: fontSize.subheadline, textAlign: 'center' },
@@ -1431,4 +1475,141 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   approvalApproveText: { color: colors.fg, fontWeight: weight.semibold },
+
+  // ---- Chat bubbles (user / assistant)
+  bubbleRow: { paddingVertical: 4 },
+  bubbleRowLeft: { alignItems: 'flex-start' },
+  bubbleRowRight: { alignItems: 'flex-end' },
+  bubble: {
+    maxWidth: '88%',
+    paddingHorizontal: spacing.md + 2,
+    paddingVertical: spacing.sm + 2,
+    borderRadius: radius.card,
+    gap: spacing.sm,
+  },
+  bubbleAssistant: {
+    backgroundColor: colors.fg5,
+    borderWidth: 1,
+    borderColor: colors.fg7,
+    borderTopLeftRadius: 4,
+  },
+  bubbleUser: {
+    backgroundColor: 'rgba(0,150,255,0.18)',
+    borderWidth: 1,
+    borderColor: colors.planBorderTop,
+    borderTopRightRadius: 4,
+  },
+  bubbleText: {
+    color: colors.fg82,
+    fontSize: fontSize.body,
+    lineHeight: fontSize.body + 7,
+  },
+  bubbleTextUser: { color: colors.fg },
+
+  // ---- Code blocks (inside bubbles)
+  codeBlock: {
+    backgroundColor: colors.bg,
+    borderRadius: radius.sm,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm + 2,
+    borderWidth: 1,
+    borderColor: colors.fg10,
+    gap: 4,
+  },
+  codeBlockLang: {
+    color: colors.fg45,
+    fontSize: fontSize.caption2,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    fontFamily: 'Menlo',
+  },
+  codeBlockText: {
+    color: colors.fg,
+    fontSize: fontSize.footnote + 1,
+    fontFamily: 'Menlo',
+    lineHeight: fontSize.footnote + 7,
+  },
+
+  // ---- Command-execution cards (tool role)
+  cmdCard: {
+    backgroundColor: colors.fg5,
+    borderRadius: radius.card,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.fg10,
+    gap: spacing.sm,
+    marginVertical: 4,
+  },
+  cmdHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  cmdHeaderLeft: { flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 },
+  cmdHeaderRight: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  cmdHeaderLabel: {
+    color: colors.fg50,
+    fontSize: fontSize.caption,
+    fontWeight: weight.medium,
+  },
+  cmdMetaText: {
+    color: colors.fg45,
+    fontSize: fontSize.caption2,
+    fontFamily: 'Menlo',
+  },
+  cmdStatusPill: {
+    fontSize: fontSize.caption2,
+    fontWeight: weight.semibold,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: radius.sm,
+    overflow: 'hidden',
+  },
+  cmdCommand: {
+    color: colors.fg,
+    fontFamily: 'Menlo',
+    fontSize: fontSize.footnote + 1,
+    paddingVertical: 2,
+  },
+  cmdOutputWrap: {
+    backgroundColor: colors.bg,
+    borderRadius: radius.sm,
+    padding: spacing.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.fg10,
+    gap: spacing.sm,
+  },
+  cmdOutputText: {
+    color: colors.fg82,
+    fontFamily: 'Menlo',
+    fontSize: fontSize.footnote,
+    lineHeight: fontSize.footnote + 6,
+  },
+  cmdExpand: {
+    color: colors.plan,
+    fontSize: fontSize.caption,
+    fontWeight: weight.medium,
+  },
+
+  // ---- System / reasoning rows
+  systemRow: {
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    gap: 4,
+    opacity: 0.7,
+  },
+  systemRowLabel: {
+    color: colors.fg45,
+    fontSize: fontSize.caption2,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    fontFamily: 'Menlo',
+  },
+  systemRowText: {
+    color: colors.fg70,
+    fontSize: fontSize.caption,
+    fontStyle: 'italic',
+    lineHeight: 16,
+  },
 });
