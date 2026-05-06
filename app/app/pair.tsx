@@ -58,7 +58,7 @@ import { colors, fontSize, radius, spacing, weight } from '@/lib/theme/tokens';
 // Thread/turn types and parsers live in lib/protocol/extract.ts so they can be
 // fixture-tested. Keep the imports here narrow.
 import { extractThreads, extractTurns, ThreadRow, TurnRow } from '@/lib/protocol/extract';
-import { DisplayItem, ToolGroup, groupTurns } from '@/lib/group-turns';
+import { IntermediateBlock, TurnDisplay, buildTurnDisplays } from '@/lib/turn-display';
 
 type Status =
   | { kind: 'loading' }
@@ -705,8 +705,8 @@ export default function PairScreen() {
               behavior={Platform.OS === 'ios' ? 'padding' : undefined}
               keyboardVerticalOffset={0}>
               <FlatList
-                data={groupTurns(status.turns) as DisplayItem[]}
-                keyExtractor={(it, i) => ('kind' in it ? it.id : it.id) || `row-${i}`}
+                data={buildTurnDisplays(status.turns)}
+                keyExtractor={(t, i) => t.id || `turn-${i}`}
                 ListEmptyComponent={
                   <View style={styles.empty}>
                     <Text style={styles.body50}>This thread has no turns yet.</Text>
@@ -721,17 +721,13 @@ export default function PairScreen() {
                     </View>
                   ) : null
                 }
-                renderItem={({ item }) =>
-                  'kind' in item ? (
-                    <ToolGroupCard group={item} />
-                  ) : (
-                    <TurnView
-                      turn={item}
-                      onApprove={(t) => decideApproval(t, 'accept')}
-                      onReject={(t) => decideApproval(t, 'reject')}
-                    />
-                  )
-                }
+                renderItem={({ item }) => (
+                  <TurnDisplayView
+                    turn={item}
+                    onApprove={(t) => decideApproval(t, 'accept')}
+                    onReject={(t) => decideApproval(t, 'reject')}
+                  />
+                )}
                 contentContainerStyle={styles.turnsPad}
               />
               <Composer
@@ -1055,29 +1051,162 @@ function Composer({
   );
 }
 
-function TurnView({
+function TurnDisplayView({
   turn,
   onApprove,
   onReject,
 }: {
-  turn: TurnRow;
-  onApprove?: (turn: TurnRow) => void;
-  onReject?: (turn: TurnRow) => void;
+  turn: TurnDisplay;
+  onApprove: (turn: TurnRow) => void;
+  onReject: (turn: TurnRow) => void;
 }) {
-  switch (turn.role) {
-    case 'approval':
-      return <ApprovalCard turn={turn} onApprove={onApprove} onReject={onReject} />;
-    case 'tool':
-      return <CommandCard turn={turn} />;
-    case 'user':
-      return <MessageBubble turn={turn} side="right" />;
-    case 'assistant':
-      return <MessageBubble turn={turn} side="left" />;
+  const primaryUser = turn.userPrompts[0] ?? null;
+  return (
+    <View style={styles.turnBlock}>
+      {primaryUser ? <MessageBubble turn={primaryUser} side="right" /> : null}
+      {turn.intermediate.length > 0 ? (
+        <WorkedForCard turn={turn} onApprove={onApprove} onReject={onReject} />
+      ) : null}
+      {turn.finalAnswer ? <MessageBubble turn={turn.finalAnswer} side="left" /> : null}
+    </View>
+  );
+}
+
+function WorkedForCard({
+  turn,
+  onApprove,
+  onReject,
+}: {
+  turn: TurnDisplay;
+  onApprove: (turn: TurnRow) => void;
+  onReject: (turn: TurnRow) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const label = turn.totalDurationMs > 0
+    ? `Worked for ${formatDuration(turn.totalDurationMs)}`
+    : `Working…`;
+  return (
+    <View style={styles.workedFor}>
+      <Pressable
+        onPress={() => setExpanded((e) => !e)}
+        style={({ pressed }) => [styles.workedForHeader, pressed && { opacity: 0.7 }]}>
+        <Text style={styles.workedForLabel}>{label}</Text>
+        <Text style={styles.workedForChevron}>{expanded ? '▾' : '▸'}</Text>
+      </Pressable>
+      {expanded ? (
+        <View style={styles.workedForBody}>
+          {turn.intermediate.map((b, i) => (
+            <IntermediateBlockView
+              key={`${turn.id}-i-${i}`}
+              block={b}
+              onApprove={onApprove}
+              onReject={onReject}
+            />
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function IntermediateBlockView({
+  block,
+  onApprove,
+  onReject,
+}: {
+  block: IntermediateBlock;
+  onApprove: (turn: TurnRow) => void;
+  onReject: (turn: TurnRow) => void;
+}) {
+  switch (block.kind) {
+    case 'narration':
+      return (
+        <View style={styles.narration}>
+          <Markdown style={markdownStyles}>{block.row.text || ''}</Markdown>
+        </View>
+      );
+    case 'user-steered':
+      return (
+        <View style={styles.steeredRow}>
+          <Text style={styles.steeredLabel}>Steered conversation</Text>
+          <View style={styles.bubble_user}>
+            <Text style={styles.bubble_userText}>{block.row.text}</Text>
+          </View>
+        </View>
+      );
+    case 'commands-batch':
+      return <CommandsBatch rows={block.rows} totalDurationMs={block.durationMs} />;
+    case 'tool-call':
+      return <ToolCallPill turn={block.row} />;
     case 'system':
-      return <SystemRow turn={turn} />;
-    default:
-      return <SystemRow turn={turn} />;
+      if (block.row.role === 'approval') {
+        return <ApprovalCard turn={block.row} onApprove={onApprove} onReject={onReject} />;
+      }
+      return null;
   }
+}
+
+function CommandsBatch({ rows, totalDurationMs }: { rows: TurnRow[]; totalDurationMs: number }) {
+  const [expanded, setExpanded] = useState(false);
+  const label = rows.length === 1
+    ? rows[0].command || '(command)'
+    : `Ran ${rows.length} commands`;
+  return (
+    <View style={styles.batchWrap}>
+      <Pressable
+        onPress={() => setExpanded((e) => !e)}
+        style={({ pressed }) => [styles.batchHeader, pressed && { opacity: 0.7 }]}>
+        <Icon name="terminal" size={11} color={colors.fg45} />
+        <Text style={styles.batchLabel} numberOfLines={1} ellipsizeMode="tail">
+          {label}
+        </Text>
+        <Text style={styles.batchChevron}>{expanded ? '▾' : '▸'}</Text>
+      </Pressable>
+      {expanded ? (
+        <View style={styles.batchChildren}>
+          {rows.map((r) => (
+            <ToolGroupChild key={r.id} turn={r} />
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function ToolCallPill({ turn }: { turn: TurnRow }) {
+  const [expanded, setExpanded] = useState(false);
+  const label = turn.toolServer
+    ? `Used ${prettyServer(turn.toolServer)}`
+    : turn.command || '(tool)';
+  return (
+    <View style={styles.pillWrap}>
+      <Pressable
+        onPress={() => setExpanded((e) => !e)}
+        style={({ pressed }) => [styles.pillHeader, pressed && { opacity: 0.7 }]}>
+        <Icon name="link" size={10} color={colors.fg45} />
+        <Text style={styles.pillLabel} numberOfLines={1}>
+          {label}
+        </Text>
+        <Text style={styles.batchChevron}>{expanded ? '▾' : '▸'}</Text>
+      </Pressable>
+      {expanded ? (
+        <View style={styles.pillBody}>
+          {turn.toolName ? (
+            <Text style={styles.pillSubLabel}>{turn.toolName}</Text>
+          ) : null}
+          {turn.output ? <CommandOutput text={turn.output} /> : null}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function prettyServer(server: string): string {
+  // codex_apps → Codex Apps; gmail → Gmail; etc.
+  return server
+    .split(/[_-]/)
+    .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+    .join(' ');
 }
 
 function MessageBubble({ turn, side }: { turn: TurnRow; side: 'left' | 'right' }) {
@@ -1097,40 +1226,6 @@ function MessageBubble({ turn, side }: { turn: TurnRow; side: 'left' | 'right' }
   return (
     <View style={styles.assistantBlock}>
       <Markdown style={markdownStyles}>{turn.text}</Markdown>
-    </View>
-  );
-}
-
-function ToolGroupCard({ group }: { group: ToolGroup }) {
-  const [expanded, setExpanded] = useState(false);
-  const label = group.totalDurationMs > 0
-    ? `Worked for ${formatDuration(group.totalDurationMs)}`
-    : `Ran ${group.tools.length} tool${group.tools.length === 1 ? '' : 's'}`;
-  const sublabel = group.failureCount > 0
-    ? ` · ${group.failureCount} failure${group.failureCount === 1 ? '' : 's'}`
-    : ` · ${group.tools.length} step${group.tools.length === 1 ? '' : 's'}`;
-
-  return (
-    <View style={styles.toolGroup}>
-      <Pressable
-        onPress={() => setExpanded((e) => !e)}
-        style={({ pressed }) => [styles.toolGroupHeader, pressed && { opacity: 0.7 }]}>
-        <Icon
-          name={expanded ? 'chevron.left' /* rotated via transform */ : 'chevron.left'}
-          size={12}
-          color={colors.fg45}
-        />
-        <Text style={styles.toolGroupChevron}>{expanded ? '▾' : '▸'}</Text>
-        <Text style={styles.toolGroupLabel}>{label}</Text>
-        <Text style={styles.toolGroupSub}>{sublabel}</Text>
-      </Pressable>
-      {expanded ? (
-        <View style={styles.toolGroupChildren}>
-          {group.tools.map((t) => (
-            <ToolGroupChild key={t.id} turn={t} />
-          ))}
-        </View>
-      ) : null}
     </View>
   );
 }
@@ -1179,46 +1274,6 @@ function ToolGroupChild({ turn }: { turn: TurnRow }) {
   );
 }
 
-function CommandCard({ turn }: { turn: TurnRow }) {
-  const exitOk = turn.exitCode === undefined ? null : turn.exitCode === 0;
-  const statusLabel = turn.toolStatus || (exitOk === true ? 'completed' : exitOk === false ? 'failed' : 'pending');
-  const duration = turn.durationMs ? formatDuration(turn.durationMs) : '';
-
-  return (
-    <View style={styles.cmdCard}>
-      <View style={styles.cmdHeader}>
-        <View style={styles.cmdHeaderLeft}>
-          <Icon name="terminal" size={12} color={colors.fg50} />
-          <Text style={styles.cmdHeaderLabel}>{cmdHeaderLabel(turn)}</Text>
-        </View>
-        <View style={styles.cmdHeaderRight}>
-          {duration ? <Text style={styles.cmdMetaText}>{duration}</Text> : null}
-          <Text
-            style={[
-              styles.cmdStatusPill,
-              exitOk === true
-                ? { color: '#9be39a', backgroundColor: 'rgba(155,227,154,0.12)' }
-                : exitOk === false
-                  ? { color: '#ff8b8b', backgroundColor: 'rgba(255,139,139,0.12)' }
-                  : { color: colors.fg50, backgroundColor: colors.fg10 },
-            ]}>
-            {exitOk === true ? `✓ ${statusLabel}` : exitOk === false ? `✕ exit ${turn.exitCode}` : statusLabel}
-          </Text>
-        </View>
-      </View>
-      {turn.command ? (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{ paddingRight: spacing.md }}>
-          <Text style={styles.cmdCommand}>{`$ ${turn.command}`}</Text>
-        </ScrollView>
-      ) : null}
-      {turn.output ? <CommandOutput text={turn.output} /> : null}
-    </View>
-  );
-}
-
 function CommandOutput({ text }: { text: string }) {
   const lines = text.split('\n');
   const isLong = lines.length > 8;
@@ -1241,25 +1296,6 @@ function CommandOutput({ text }: { text: string }) {
       ) : null}
     </View>
   );
-}
-
-function SystemRow({ turn }: { turn: TurnRow }) {
-  return (
-    <View style={styles.systemRow}>
-      <Text style={styles.systemRowLabel}>{turn.role === 'unknown' ? 'item' : turn.role}</Text>
-      <Text style={styles.systemRowText} numberOfLines={6}>
-        {turn.text}
-      </Text>
-    </View>
-  );
-}
-
-function cmdHeaderLabel(turn: TurnRow): string {
-  if (turn.cwd) {
-    const base = turn.cwd.split('/').filter(Boolean).pop() || turn.cwd;
-    return base;
-  }
-  return 'shell';
 }
 
 function formatDuration(ms: number): string {
@@ -1924,14 +1960,96 @@ const styles = StyleSheet.create({
     borderTopColor: colors.fg10,
   },
 
-  // ---- Tool group (collapsible "Worked for Xs")
+  // ---- Per-turn block (one user prompt + worked-for + final answer)
+  turnBlock: {
+    paddingBottom: spacing.lg,
+    gap: spacing.sm,
+  },
+  // ---- "Worked for Xs" expandable
+  workedFor: {
+    marginVertical: spacing.xs,
+  },
+  workedForHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: spacing.sm,
+  },
+  workedForLabel: {
+    color: colors.fg70,
+    fontSize: fontSize.subheadline,
+    fontWeight: weight.medium,
+  },
+  workedForChevron: {
+    color: colors.fg45,
+    fontSize: 12,
+  },
+  workedForBody: {
+    paddingLeft: 0,
+    paddingTop: 4,
+    gap: spacing.sm,
+  },
+  // ---- Narration / steered
+  narration: {
+    paddingVertical: 4,
+  },
+  steeredRow: {
+    alignItems: 'flex-end',
+    gap: 4,
+    marginVertical: spacing.sm,
+  },
+  steeredLabel: {
+    color: colors.fg45,
+    fontSize: fontSize.caption2,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  // ---- Compact command batch (no card border)
+  batchWrap: { paddingVertical: 2 },
+  batchHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 6,
+  },
+  batchLabel: {
+    flex: 1,
+    color: colors.fg70,
+    fontSize: fontSize.subheadline,
+    fontFamily: 'Menlo',
+  },
+  batchChevron: { color: colors.fg45, fontSize: 12 },
+  batchChildren: {
+    paddingTop: 4,
+    paddingLeft: spacing.md,
+    gap: 2,
+  },
+  // ---- "Used Gmail" pill (compact, no card border)
+  pillWrap: { paddingVertical: 2 },
+  pillHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 6,
+  },
+  pillLabel: {
+    flex: 1,
+    color: colors.fg70,
+    fontSize: fontSize.subheadline,
+  },
+  pillSubLabel: {
+    color: colors.fg45,
+    fontSize: fontSize.caption,
+    fontFamily: 'Menlo',
+  },
+  pillBody: {
+    paddingLeft: spacing.md,
+    paddingTop: 4,
+    gap: 4,
+  },
+  // ---- Legacy tool group styles (not used after refactor — kept for now)
   toolGroup: {
     marginVertical: spacing.sm,
-    borderRadius: radius.card,
-    backgroundColor: colors.fg5,
-    borderWidth: 1,
-    borderColor: colors.fg10,
-    overflow: 'hidden',
   },
   toolGroupHeader: {
     flexDirection: 'row',

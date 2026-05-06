@@ -39,6 +39,19 @@ export type TurnRow = {
   role: 'user' | 'assistant' | 'system' | 'tool' | 'approval' | 'unknown';
   text: string;
   status?: string;
+  // Which Codex turn this row came from (chronologically — 0 = oldest).
+  // Set by extractTurns; used by lib/turn-display.ts to wrap intermediate
+  // items in a "Worked for" container.
+  turnIndex?: number;
+  // For agentMessage: the agent phase (`commentary` for intermediate
+  // narration, `final_answer` for the actual response, plus the iOS-only
+  // `reasoning`/etc). For tool rows: undefined.
+  phase?: string;
+  // For mcpToolCall rows: which MCP server.tool was used. Used so the UI
+  // can render "Used Gmail" badges alongside command batches.
+  toolKind?: 'command' | 'mcp' | 'file' | 'other';
+  toolServer?: string;
+  toolName?: string;
   createdAt?: number;
   raw: unknown;
 
@@ -102,19 +115,21 @@ export function extractTurns(result: unknown): TurnRow[] {
   // outer turn order. Items inside each turn are already chronological.
   const ordered = list.slice().reverse();
   const rows: TurnRow[] = [];
-  for (const t of ordered) {
+  for (let turnIndex = 0; turnIndex < ordered.length; turnIndex++) {
+    const t = ordered[turnIndex];
     if (!isRecord(t)) continue;
     const turnId = pickString(t.id, t.turnId) || `turn-${rows.length}`;
     const items = Array.isArray(t.items) ? t.items : [];
     if (items.length === 0) {
-      rows.push(...flatTurnRows(turnId, t));
+      const flat = flatTurnRows(turnId, t).map((r) => ({ ...r, turnIndex }));
+      rows.push(...flat);
       continue;
     }
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       if (!isRecord(item)) continue;
       const row = itemToTurnRow(turnId, i, item);
-      if (row) rows.push(row);
+      if (row) rows.push({ ...row, turnIndex });
     }
   }
   return rows;
@@ -137,7 +152,7 @@ function itemToTurnRow(turnId: string, index: number, item: Record<string, unkno
     case 'assistant_message': {
       const text = pickString(item.text) || textFromContent(item.content);
       const phase = pickString(item.phase);
-      return { ...mkRow(itemId, 'assistant', text, item), status: phase };
+      return { ...mkRow(itemId, 'assistant', text, item), status: phase, phase };
     }
 
     case 'reasoning':
@@ -156,6 +171,7 @@ function itemToTurnRow(turnId: string, index: number, item: Record<string, unkno
       const cwd = pickString(item.cwd);
       return {
         ...mkRow(itemId, 'tool', command || '(command)', item),
+        toolKind: 'command',
         command,
         toolStatus: status,
         exitCode,
@@ -172,6 +188,7 @@ function itemToTurnRow(turnId: string, index: number, item: Record<string, unkno
       const status = pickString(item.status);
       return {
         ...mkRow(itemId, 'tool', command, item),
+        toolKind: 'file',
         command,
         toolStatus: status,
       };
@@ -203,6 +220,9 @@ function itemToTurnRow(turnId: string, index: number, item: Record<string, unkno
       const durationMs = typeof item.durationMs === 'number' ? item.durationMs : undefined;
       return {
         ...mkRow(itemId, 'tool', command, item),
+        toolKind: 'mcp',
+        toolServer: server,
+        toolName: tool,
         command,
         toolStatus: status,
         output: output || argsText,

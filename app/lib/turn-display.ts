@@ -1,0 +1,161 @@
+// Restructures a flat TurnRow[] (chronological, post-extract) into per-turn
+// display blocks that match iOS Codex's chat layout:
+//
+//   [user prompt bubble]
+//   [Worked for {duration} ▼ — wraps everything intermediate]
+//     ├── narration (intermediate agentMessage with phase=commentary)
+//     ├── steered user prompts (mid-turn userMessage)
+//     ├── commands-batch (consecutive commandExecution rows, collapsible)
+//     └── tool-call (mcpToolCall, each rendered as its own pill: "Used Gmail")
+//   [final assistant text — plain markdown, full width]
+//
+// Driven entirely off the `turnIndex`, `phase`, and `toolKind` fields that
+// extract.ts now sets on each row. Pure function; tested with fixtures.
+
+import type { TurnRow } from './protocol/extract';
+
+export type TurnDisplay = {
+  id: string;
+  userPrompts: TurnRow[];
+  intermediate: IntermediateBlock[];
+  finalAnswer: TurnRow | null;
+  // Sum of all tool durations inside the turn — used to render the "Worked for X" label.
+  totalDurationMs: number;
+};
+
+export type IntermediateBlock =
+  | { kind: 'narration'; row: TurnRow }
+  | { kind: 'user-steered'; row: TurnRow }
+  | { kind: 'commands-batch'; rows: TurnRow[]; durationMs: number }
+  | { kind: 'tool-call'; row: TurnRow }
+  | { kind: 'system'; row: TurnRow };
+
+export function buildTurnDisplays(rows: TurnRow[]): TurnDisplay[] {
+  // Bucket by turnIndex. Rows without a turnIndex (e.g., live-streamed
+  // optimistic rows from compose) get bucketed into a synthetic last turn.
+  const byTurn = new Map<number, TurnRow[]>();
+  let maxIndex = -1;
+  let unindexedFallback: TurnRow[] = [];
+
+  for (const r of rows) {
+    if (typeof r.turnIndex === 'number') {
+      maxIndex = Math.max(maxIndex, r.turnIndex);
+      const bucket = byTurn.get(r.turnIndex) ?? [];
+      bucket.push(r);
+      byTurn.set(r.turnIndex, bucket);
+    } else {
+      unindexedFallback.push(r);
+    }
+  }
+
+  if (unindexedFallback.length > 0) {
+    const idx = maxIndex + 1;
+    byTurn.set(idx, unindexedFallback);
+    maxIndex = idx;
+  }
+
+  const out: TurnDisplay[] = [];
+  for (let i = 0; i <= maxIndex; i++) {
+    const bucket = byTurn.get(i);
+    if (bucket && bucket.length > 0) out.push(buildOne(bucket, i));
+  }
+  return out;
+}
+
+function buildOne(rows: TurnRow[], turnIdx: number): TurnDisplay {
+  const userPrompts: TurnRow[] = [];
+  let finalAnswer: TurnRow | null = null;
+
+  // Find the LAST assistant row whose phase looks final.
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    if (r.role === 'assistant' && isFinalPhase(r.phase)) {
+      finalAnswer = r;
+      break;
+    }
+  }
+  // Fallback: if no explicit final_answer marker, treat the last assistant
+  // row as the final answer. Useful for in-flight turns and legacy shapes.
+  if (!finalAnswer) {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i].role === 'assistant') {
+        finalAnswer = rows[i];
+        break;
+      }
+    }
+  }
+
+  // Collect all userMessages — the first becomes the bubble at the top of
+  // the turn, the rest are "steered" messages embedded inside the work.
+  for (const r of rows) if (r.role === 'user') userPrompts.push(r);
+
+  // Build intermediate blocks: everything that's NOT the primary user prompt
+  // and NOT the final answer.
+  const primaryUser = userPrompts[0] ?? null;
+  const intermediate: IntermediateBlock[] = [];
+  let cmdBuffer: TurnRow[] = [];
+  let cmdDuration = 0;
+
+  const flushCommands = () => {
+    if (cmdBuffer.length === 0) return;
+    intermediate.push({ kind: 'commands-batch', rows: cmdBuffer, durationMs: cmdDuration });
+    cmdBuffer = [];
+    cmdDuration = 0;
+  };
+
+  let totalDurationMs = 0;
+
+  for (const r of rows) {
+    if (r === primaryUser) continue;
+    if (r === finalAnswer) continue;
+
+    if (r.role === 'tool' && r.toolKind === 'command') {
+      cmdBuffer.push(r);
+      if (typeof r.durationMs === 'number') {
+        cmdDuration += r.durationMs;
+        totalDurationMs += r.durationMs;
+      }
+      continue;
+    }
+    flushCommands();
+
+    if (r.role === 'tool' && r.toolKind === 'mcp') {
+      intermediate.push({ kind: 'tool-call', row: r });
+      if (typeof r.durationMs === 'number') totalDurationMs += r.durationMs;
+      continue;
+    }
+    if (r.role === 'tool') {
+      // Other tool kinds (file, generic) — render as a single tool-call too.
+      intermediate.push({ kind: 'tool-call', row: r });
+      if (typeof r.durationMs === 'number') totalDurationMs += r.durationMs;
+      continue;
+    }
+    if (r.role === 'user') {
+      intermediate.push({ kind: 'user-steered', row: r });
+      continue;
+    }
+    if (r.role === 'assistant') {
+      // Intermediate agentMessage (phase != final_answer)
+      intermediate.push({ kind: 'narration', row: r });
+      continue;
+    }
+    if (r.role === 'system' || r.role === 'unknown') {
+      intermediate.push({ kind: 'system', row: r });
+      continue;
+    }
+  }
+  flushCommands();
+
+  return {
+    id: rows[0]?.id ?? `turn-${turnIdx}`,
+    userPrompts,
+    intermediate,
+    finalAnswer,
+    totalDurationMs,
+  };
+}
+
+function isFinalPhase(phase: string | undefined): boolean {
+  if (!phase) return false;
+  return phase === 'final_answer' || phase === 'final';
+}
