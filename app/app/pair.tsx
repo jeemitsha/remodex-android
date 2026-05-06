@@ -238,11 +238,12 @@ export default function PairScreen() {
   // Single source of truth for the outer chat container's bottom padding:
   //   - keyboard up → use its full height (it covers the gesture-nav area)
   //   - keyboard closed → use the bottom safe-area inset
-  // The Composer doesn't add its own bottom padding anymore — that was
-  // double-counting, since RN 0.81 + edge-to-edge has insets.bottom GROW
-  // when the keyboard opens (IME is included), so adding it inside the
-  // composer made the composer "fly up" by an extra keyboardHeight.
   const chatBottomPad = keyboardHeight > 0 ? keyboardHeight : insets.bottom;
+  // Diagnostic — drop once keyboard layout is verified on phone.
+  useEffect(() => {
+    if (!__DEV__) return;
+    console.log('[remodex/kb]', { keyboardHeight, insetsBottom: insets.bottom, chatBottomPad });
+  }, [keyboardHeight, insets.bottom, chatBottomPad]);
   const [status, setStatus] = useState<Status>({ kind: 'loading' });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // Models are loaded once after `initialize` and stay valid for the whole
@@ -856,7 +857,9 @@ export default function PairScreen() {
         threadId: cur.thread.id,
         input: buildTurnInput({ text, attachments: encodedAttachments, imageURLKey }),
         sandboxPolicy: { type: 'workspaceWrite', networkAccess: true },
-        approvalPolicy: 'onRequest',
+        // Bridge insists on kebab-case here. Accepted variants per its
+        // error response: untrusted | on-failure | on-request | granular | never.
+        approvalPolicy: 'on-request',
       };
       const sel = cur.selection;
       const selectedModel = selectedModelOption(availableModels, sel);
