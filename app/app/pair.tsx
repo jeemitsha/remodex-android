@@ -216,12 +216,6 @@ export default function PairScreen() {
   // macDeviceId is needed to key the threads cache. Captured once we know
   // the saved pairing or after a fresh QR pair.
   const macDeviceIdRef = useRef<string | null>(null);
-  // Used to scroll the chat to the newest message when a thread is freshly
-  // opened. After that, maintainVisibleContentPosition keeps the viewport
-  // anchored when older turns prepend at the top.
-  const turnsListRef = useRef<FlatList | null>(null);
-  const lastOpenedThreadRef = useRef<string | null>(null);
-  const needsScrollToBottomRef = useRef(false);
   // If the user taps a cached thread before the bridge has finished
   // handshaking, hold the request here. As soon as `sessions-ready` arrives,
   // a useEffect below drains it via openThread.
@@ -1116,13 +1110,6 @@ export default function PairScreen() {
     });
   }
 
-  // Mark "needs scroll to bottom" the first time we land on a freshly-opened
-  // thread. The actual scroll happens in onContentSizeChange below.
-  if (status.kind === 'thread-ready' && status.thread.id !== lastOpenedThreadRef.current) {
-    lastOpenedThreadRef.current = status.thread.id;
-    needsScrollToBottomRef.current = true;
-  }
-
   // Drain any thread-open queued while we were still handshaking.
   useEffect(() => {
     if (status.kind !== 'sessions-ready') return;
@@ -1238,42 +1225,31 @@ export default function PairScreen() {
               behavior={Platform.OS === 'ios' ? 'padding' : undefined}
               keyboardVerticalOffset={0}>
               <FlatList
-                ref={turnsListRef}
-                data={buildTurnDisplays(status.turns, status.turnMeta)}
+                // Standard chat-app pattern: inverted FlatList renders the
+                // first data item at the BOTTOM of the viewport. We pass
+                // turns newest-first so the latest message lands at the
+                // bottom on open — no scroll-to-end gymnastics needed.
+                inverted
+                data={buildTurnDisplays(status.turns, status.turnMeta).slice().reverse()}
                 keyExtractor={(t, i) => t.id || `turn-${i}`}
-                // When older turns prepend at the top, keep the user's
-                // current visible item locked in place instead of letting
-                // the viewport jump.
-                maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
-                onContentSizeChange={() => {
-                  if (needsScrollToBottomRef.current) {
-                    needsScrollToBottomRef.current = false;
-                    turnsListRef.current?.scrollToEnd({ animated: false });
+                // With inverted, "end" of the data = top of viewport. Older
+                // pages live at the end of the array, so onEndReached fires
+                // when the user scrolls up to load older history.
+                onEndReached={() => {
+                  if (status.olderCursor && !status.loadingMoreTurns) {
+                    void loadOlderTurns();
                   }
                 }}
+                onEndReachedThreshold={0.3}
                 ListEmptyComponent={
                   <View style={styles.empty}>
                     <Text style={styles.body50}>This thread has no turns yet.</Text>
                   </View>
                 }
+                // ListHeader sits at the START of the data → BOTTOM of the
+                // inverted viewport. Stream the in-flight assistant text here
+                // so it appears just under the latest message.
                 ListHeaderComponent={
-                  status.olderCursor ? (
-                    <Pressable
-                      onPress={loadOlderTurns}
-                      disabled={status.loadingMoreTurns}
-                      style={({ pressed }) => [
-                        styles.loadOlderRow,
-                        pressed && { opacity: 0.6 },
-                      ]}>
-                      {status.loadingMoreTurns ? (
-                        <ActivityIndicator color={colors.fg45} size="small" />
-                      ) : (
-                        <Text style={styles.loadOlderText}>Load older messages</Text>
-                      )}
-                    </Pressable>
-                  ) : null
-                }
-                ListFooterComponent={
                   status.streamingText ? (
                     <View style={styles.assistantBlock}>
                       <Markdown style={markdownStyles}>
@@ -1282,19 +1258,22 @@ export default function PairScreen() {
                     </View>
                   ) : null
                 }
-                onScroll={(e) => {
-                  // Auto-fire pagination when the user scrolls to within 80px
-                  // of the top — feels like infinite scroll without needing
-                  // RN's missing onStartReached.
-                  if (
-                    status.olderCursor
-                    && !status.loadingMoreTurns
-                    && e.nativeEvent.contentOffset.y < 80
-                  ) {
-                    void loadOlderTurns();
-                  }
-                }}
-                scrollEventThrottle={250}
+                // ListFooter sits at the END of the data → TOP of the
+                // inverted viewport. Show pagination state there.
+                ListFooterComponent={
+                  status.olderCursor ? (
+                    <Pressable
+                      onPress={loadOlderTurns}
+                      disabled={status.loadingMoreTurns}
+                      style={({ pressed }) => [styles.loadOlderRow, pressed && { opacity: 0.6 }]}>
+                      {status.loadingMoreTurns ? (
+                        <ActivityIndicator color={colors.fg45} size="small" />
+                      ) : (
+                        <Text style={styles.loadOlderText}>Load older messages</Text>
+                      )}
+                    </Pressable>
+                  ) : null
+                }
                 renderItem={({ item }) => (
                   <TurnDisplayView
                     turn={item}
