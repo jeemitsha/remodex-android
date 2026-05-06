@@ -29,7 +29,7 @@ import {
   Dimensions,
   FlatList,
   Image,
-  KeyboardAvoidingView,
+  Keyboard,
   Modal,
   Platform,
   Pressable,
@@ -135,6 +135,32 @@ import {
 // Tap "Show all (N)" on a section to reveal the rest. Mirrors the leaner
 // Linear/Slack-style sidebar UX rather than iOS Codex's flat dump.
 const SIDEBAR_THREADS_PER_GROUP = 5;
+
+// Tracks the on-screen keyboard height. We use explicit listeners instead of
+// <KeyboardAvoidingView> because Expo's edgeToEdgeEnabled mode suppresses
+// Android's adjustResize behavior — the keyboard slides up *over* the content
+// without the framework resizing anything. We feed this height into the
+// composer wrap's paddingBottom so the input always sits above the keyboard.
+function useKeyboardHeight(): number {
+  const [h, setH] = useState(0);
+  useEffect(() => {
+    // iOS fires keyboardWillShow before the keyboard finishes animating in,
+    // which gives smooth co-animated layout shifts. Android only exposes
+    // keyboardDidShow, so on Android we accept the brief keyboard-then-shift
+    // visual.
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSub = Keyboard.addListener(showEvt, (e) => {
+      setH(e.endCoordinates?.height ?? 0);
+    });
+    const hideSub = Keyboard.addListener(hideEvt, () => setH(0));
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+  return h;
+}
 
 type Status =
   | { kind: 'loading' }
@@ -1203,10 +1229,7 @@ export default function PairScreen() {
             </View>
           )}
           {status.kind === 'thread-ready' && (
-            <KeyboardAvoidingView
-              style={{ flex: 1 }}
-              behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-              keyboardVerticalOffset={0}>
+            <View style={{ flex: 1 }}>
               <FlatList
                 // Standard chat-app pattern: inverted FlatList renders the
                 // first data item at the BOTTOM of the viewport. We pass
@@ -1292,7 +1315,7 @@ export default function PairScreen() {
                 onTranscribe={transcribeVoiceClip}
                 onTranscribed={appendToComposer}
               />
-            </KeyboardAvoidingView>
+            </View>
           )}
         </View>
       )}
@@ -1786,6 +1809,12 @@ function Composer({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [recorderOpen, setRecorderOpen] = useState(false);
   const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
+  // When the keyboard is up, push the composer above it. Otherwise leave the
+  // bottom safe-area inset (gesture nav) intact. spacing.sm is the floor
+  // for devices that report 0 inset (most physical-button phones).
+  const composerBottomPad =
+    keyboardHeight > 0 ? keyboardHeight : Math.max(insets.bottom, spacing.sm);
   const sendable = isComposerSendable({
     ...INITIAL_COMPOSER_STATE,
     text,
@@ -1796,7 +1825,7 @@ function Composer({
   const showsBolt = selection.serviceTier === 'fast';
 
   return (
-    <View style={[styles.composerWrap, { paddingBottom: Math.max(insets.bottom, spacing.sm) }]}>
+    <View style={[styles.composerWrap, { paddingBottom: composerBottomPad }]}>
       <View style={styles.composerCard}>
         {attachments.length > 0 ? (
           <ScrollView
