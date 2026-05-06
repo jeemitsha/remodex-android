@@ -19,6 +19,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  SectionList,
   StyleSheet,
   Text,
   TextInput,
@@ -41,6 +42,7 @@ import {
   SecureSession,
 } from '@/lib/protocol/secureTransport';
 import { resolveTrustedSession } from '@/lib/protocol/trustedSessionResolve';
+import { groupThreadsByProject, relativeTime, statusColor } from '@/lib/sidebar';
 import { pendingPairing } from '@/lib/state/pendingPairing';
 import {
   clearSavedPairing,
@@ -694,29 +696,44 @@ export default function PairScreen() {
       {status.kind === 'sessions-ready' && (
         <View style={{ flex: 1 }}>
           <PairedHeader session={status.session} mode={status.mode} />
-          <FlatList
-            data={status.threads}
-            keyExtractor={(t, i) => t.id || `thread-${i}`}
-            ListEmptyComponent={
-              <View style={styles.empty}>
-                <Text style={styles.body50}>
-                  No threads returned by the bridge. Start one in Codex CLI on your Mac to see it
-                  here.
-                </Text>
-              </View>
-            }
-            ListHeaderComponent={
-              <Text style={styles.sectionLabel}>
-                {status.threads.length} thread{status.threads.length === 1 ? '' : 's'}
+          {status.threads.length === 0 ? (
+            <View style={styles.empty}>
+              <Text style={styles.body50}>
+                No threads returned by the bridge. Start one in Codex CLI on your Mac to see it
+                here.
               </Text>
-            }
-            renderItem={({ item }) => (
-              <Pressable onPress={() => openThread(item)} style={({ pressed }) => pressed && { opacity: 0.6 }}>
-                <ThreadRowView thread={item} />
-              </Pressable>
-            )}
-            contentContainerStyle={styles.listPad}
-          />
+            </View>
+          ) : (
+            <SectionList
+              sections={groupThreadsByProject(status.threads).map((g) => ({
+                key: g.key,
+                label: g.label,
+                fullPath: g.fullPath,
+                data: g.threads,
+              }))}
+              keyExtractor={(t, i) => t.id || `thread-${i}`}
+              stickySectionHeadersEnabled={false}
+              renderSectionHeader={({ section }) => (
+                <View style={styles.projectSectionHeader}>
+                  <Text style={styles.projectSectionLabel} numberOfLines={1}>
+                    {section.label}
+                  </Text>
+                  <Text style={styles.projectSectionCount}>
+                    {section.data.length}
+                  </Text>
+                </View>
+              )}
+              renderItem={({ item }) => (
+                <Pressable
+                  onPress={() => openThread(item)}
+                  style={({ pressed }) => pressed && { opacity: 0.6 }}>
+                  <ThreadRowView thread={item} />
+                </Pressable>
+              )}
+              ItemSeparatorComponent={() => <View style={styles.threadRowSep} />}
+              contentContainerStyle={styles.listPad}
+            />
+          )}
           <View style={styles.footerBar}>
             <Pressable onPress={rescan} style={styles.footerBtn}>
               <Text style={styles.footerBtnText}>Re-pair</Text>
@@ -824,19 +841,24 @@ function PairedHeader({ session, mode }: { session: SecureSession; mode: Handsha
 }
 
 function ThreadRowView({ thread }: { thread: ThreadRow }) {
-  const subtitle = thread.cwd
-    ? thread.cwd
-    : thread.status
-      ? thread.status
-      : thread.id;
+  const dotColor = statusColor(thread.status);
+  const timing = relativeTime(thread.updatedAt);
   return (
     <View style={styles.threadRow}>
-      <Text style={styles.threadTitle} numberOfLines={1}>
-        {thread.title || thread.id}
-      </Text>
-      <Text style={styles.threadSub} numberOfLines={1}>
-        {subtitle}
-      </Text>
+      <View style={styles.threadDotSlot}>
+        {dotColor ? <View style={[styles.threadDot, { backgroundColor: dotColor }]} /> : null}
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.threadTitle} numberOfLines={1}>
+          {thread.title || thread.id}
+        </Text>
+        {thread.status && thread.status !== 'completed' && thread.status !== 'idle' ? (
+          <Text style={styles.threadSub} numberOfLines={1}>
+            {thread.status}
+          </Text>
+        ) : null}
+      </View>
+      {timing ? <Text style={styles.threadTiming}>{timing}</Text> : null}
     </View>
   );
 }
@@ -1196,13 +1218,40 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
   },
   listPad: { paddingHorizontal: spacing.xl, paddingBottom: 100 },
-  threadRow: {
-    paddingVertical: spacing.md,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.fg10,
+  projectSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingTop: spacing.lg,
+    paddingBottom: spacing.sm,
+    gap: spacing.sm,
   },
-  threadTitle: { color: colors.fg, fontSize: fontSize.body, fontWeight: weight.semibold },
-  threadSub: { color: colors.fg50, fontSize: fontSize.caption, marginTop: 2 },
+  projectSectionLabel: {
+    color: colors.fg,
+    fontSize: fontSize.subheadline,
+    fontWeight: weight.semibold,
+    flex: 1,
+  },
+  projectSectionCount: {
+    color: colors.fg45,
+    fontSize: fontSize.caption,
+    fontFamily: 'Menlo',
+  },
+  threadRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.md,
+  },
+  threadRowSep: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: colors.fg10,
+    marginLeft: 24, // align with title (skip the dot slot)
+  },
+  threadDotSlot: { width: 16, alignItems: 'center', justifyContent: 'center' },
+  threadDot: { width: 8, height: 8, borderRadius: 4 },
+  threadTitle: { color: colors.fg, fontSize: fontSize.body, fontWeight: weight.regular },
+  threadSub: { color: colors.fg45, fontSize: fontSize.caption, marginTop: 2 },
+  threadTiming: { color: colors.fg45, fontSize: fontSize.footnote, fontFamily: 'Menlo' },
   empty: { paddingVertical: spacing.xxl, alignItems: 'center' },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xxl },
   centeredText: { color: colors.fg, fontSize: fontSize.subheadline, textAlign: 'center' },
