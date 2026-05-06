@@ -10,14 +10,18 @@
 //
 // After pair: send `initialize`, then `thread/list`, render the result.
 
+import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Animated,
   Dimensions,
   FlatList,
+  Image,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -60,6 +64,12 @@ import { colors, fontSize, radius, spacing, weight } from '@/lib/theme/tokens';
 import { extractThreads, extractTurnMeta, extractTurns, ThreadRow, TurnMeta, TurnRow } from '@/lib/protocol/extract';
 import { formatDuration } from '@/lib/format';
 import { IntermediateBlock, TurnDisplay, buildTurnDisplays } from '@/lib/turn-display';
+import {
+  ComposerAttachment,
+  INITIAL_COMPOSER_STATE,
+  isComposerSendable,
+  remainingAttachmentSlots,
+} from '@/lib/composer-state';
 
 // How many threads each project section shows by default in the sidebar drawer.
 // Tap "Show all (N)" on a section to reveal the rest. Mirrors the leaner
@@ -99,6 +109,9 @@ type Status =
       turnMeta: TurnMeta[];
       rawTurns: unknown;
       composer: string;
+      attachments: ComposerAttachment[];
+      planArmed: boolean;
+      modelLabel: string;
       activeTurnId: string | null;
       streamingText: string;
       isSending: boolean;
@@ -430,7 +443,10 @@ export default function PairScreen() {
         turns: extractTurns(resp.result),
         turnMeta: extractTurnMeta(resp.result),
         rawTurns: resp.result,
-        composer: '',
+        composer: INITIAL_COMPOSER_STATE.text,
+        attachments: INITIAL_COMPOSER_STATE.attachments,
+        planArmed: INITIAL_COMPOSER_STATE.planArmed,
+        modelLabel: INITIAL_COMPOSER_STATE.modelLabel,
         activeTurnId: null,
         streamingText: '',
         isSending: false,
@@ -585,6 +601,7 @@ export default function PairScreen() {
       ...cur,
       turns: [...cur.turns, optimisticUser],
       composer: '',
+      attachments: [],
       isSending: true,
       streamingText: '',
       activeTurnId: null,
@@ -615,6 +632,84 @@ export default function PairScreen() {
 
   function setComposer(text: string) {
     setStatus((prev) => (prev.kind === 'thread-ready' ? { ...prev, composer: text } : prev));
+  }
+
+  function setPlanArmed(armed: boolean) {
+    setStatus((prev) => (prev.kind === 'thread-ready' ? { ...prev, planArmed: armed } : prev));
+  }
+
+  function removeAttachment(id: string) {
+    setStatus((prev) =>
+      prev.kind === 'thread-ready'
+        ? { ...prev, attachments: prev.attachments.filter((a) => a.id !== id) }
+        : prev,
+    );
+  }
+
+  async function pickImagesFromLibrary() {
+    const cur = status;
+    if (cur.kind !== 'thread-ready') return;
+    const remaining = remainingAttachmentSlots({
+      ...INITIAL_COMPOSER_STATE,
+      attachments: cur.attachments,
+    });
+    if (remaining === 0) return;
+    const perm = await ImagePicker.getMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      const req = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!req.granted) {
+        Alert.alert('Photos access', 'Enable photo library access in Settings to attach images.');
+        return;
+      }
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: 'images',
+      allowsMultipleSelection: true,
+      selectionLimit: remaining,
+      quality: 0.85,
+    });
+    if (result.canceled || !result.assets?.length) return;
+    const items: ComposerAttachment[] = result.assets.map((a, i) => ({
+      id: `att-${Date.now()}-${i}-${a.assetId ?? a.uri.slice(-12)}`,
+      uri: a.uri,
+      width: a.width,
+      height: a.height,
+    }));
+    setStatus((prev) =>
+      prev.kind === 'thread-ready'
+        ? { ...prev, attachments: prev.attachments.concat(items).slice(0, prev.attachments.length + remaining) }
+        : prev,
+    );
+  }
+
+  async function takePhoto() {
+    const cur = status;
+    if (cur.kind !== 'thread-ready') return;
+    const remaining = remainingAttachmentSlots({
+      ...INITIAL_COMPOSER_STATE,
+      attachments: cur.attachments,
+    });
+    if (remaining === 0) return;
+    const perm = await ImagePicker.getCameraPermissionsAsync();
+    if (!perm.granted) {
+      const req = await ImagePicker.requestCameraPermissionsAsync();
+      if (!req.granted) {
+        Alert.alert('Camera access', 'Enable camera access in Settings to take photos.');
+        return;
+      }
+    }
+    const result = await ImagePicker.launchCameraAsync({ mediaTypes: 'images', quality: 0.85 });
+    if (result.canceled || !result.assets?.length) return;
+    const a = result.assets[0];
+    const item: ComposerAttachment = {
+      id: `att-${Date.now()}-cam`,
+      uri: a.uri,
+      width: a.width,
+      height: a.height,
+    };
+    setStatus((prev) =>
+      prev.kind === 'thread-ready' ? { ...prev, attachments: prev.attachments.concat(item) } : prev,
+    );
   }
 
   function closeThread() {
@@ -740,9 +835,16 @@ export default function PairScreen() {
               />
               <Composer
                 text={status.composer}
+                attachments={status.attachments}
+                planArmed={status.planArmed}
+                modelLabel={status.modelLabel}
+                isSending={status.isSending}
                 onChange={setComposer}
                 onSend={sendPrompt}
-                disabled={status.isSending}
+                onPickImages={pickImagesFromLibrary}
+                onTakePhoto={takePhoto}
+                onTogglePlan={() => setPlanArmed(!status.planArmed)}
+                onRemoveAttachment={removeAttachment}
               />
             </KeyboardAvoidingView>
           )}
@@ -1039,45 +1141,223 @@ function ThreadHeader({ thread, onMenu }: { thread: ThreadRow; onMenu: () => voi
   );
 }
 
+// Composer card — mirrors iOS TurnComposerView.swift. One rounded card holds:
+//   - attachments preview row (only when there's at least one attachment)
+//   - multi-line TextInput
+//   - bottom bar: [+ menu] [model pill ▾] [Plan pill?] (spacer) [ctx pill] [mic] [send]
+//
+// The "+" menu is a custom modal sheet (RN's ActionSheetIOS doesn't exist on
+// Android). Mic + model picker + ctx pill are visible-but-stubbed: the UI is
+// in place so the layout reads right, but the JSON-RPC channels behind them
+// (runtime/list-models, context-window-usage events, voice transcription)
+// aren't reverse-engineered yet — see Docs/STATE.md "Next chunks".
 function Composer({
   text,
+  attachments,
+  planArmed,
+  modelLabel,
+  isSending,
   onChange,
   onSend,
-  disabled,
+  onPickImages,
+  onTakePhoto,
+  onTogglePlan,
+  onRemoveAttachment,
 }: {
   text: string;
+  attachments: ComposerAttachment[];
+  planArmed: boolean;
+  modelLabel: string;
+  isSending: boolean;
   onChange: (s: string) => void;
   onSend: () => void;
-  disabled: boolean;
+  onPickImages: () => void;
+  onTakePhoto: () => void;
+  onTogglePlan: () => void;
+  onRemoveAttachment: (id: string) => void;
+}) {
+  const [plusOpen, setPlusOpen] = useState(false);
+  const sendable = isComposerSendable({
+    ...INITIAL_COMPOSER_STATE,
+    text,
+    attachments,
+  });
+  const sendDisabled = !sendable || isSending;
+
+  return (
+    <View style={styles.composerWrap}>
+      <View style={styles.composerCard}>
+        {attachments.length > 0 ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.attachmentsRow}>
+            {attachments.map((a) => (
+              <View key={a.id} style={styles.attachmentTile}>
+                <Image source={{ uri: a.uri }} style={styles.attachmentThumb} />
+                <Pressable
+                  onPress={() => onRemoveAttachment(a.id)}
+                  hitSlop={8}
+                  style={styles.attachmentRemove}>
+                  <Icon name="xmark" size={10} color={colors.fg} />
+                </Pressable>
+              </View>
+            ))}
+          </ScrollView>
+        ) : null}
+
+        <TextInput
+          style={styles.composerInput}
+          value={text}
+          onChangeText={onChange}
+          placeholder="Send a prompt to Codex…"
+          placeholderTextColor={colors.fg40}
+          multiline
+          editable={!isSending}
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+
+        <View style={styles.composerBar}>
+          <Pressable
+            onPress={() => setPlusOpen(true)}
+            hitSlop={8}
+            style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
+            <Icon name="plus" size={18} color={colors.fg70} />
+          </Pressable>
+
+          <Pressable
+            onPress={() =>
+              Alert.alert(
+                'Model selection',
+                'Bridge runtime/list-models channel not wired yet — using bridge default.',
+              )
+            }
+            style={({ pressed }) => [styles.modelPill, pressed && { opacity: 0.7 }]}>
+            <Text style={styles.modelPillText} numberOfLines={1}>
+              {modelLabel}
+            </Text>
+            <Icon name="chevron.down" size={10} color={colors.fg45} />
+          </Pressable>
+
+          {planArmed ? (
+            <View style={styles.planPill}>
+              <Icon name="checklist" size={11} color={colors.plan} />
+              <Text style={styles.planPillText}>Plan</Text>
+            </View>
+          ) : null}
+
+          <View style={{ flex: 1 }} />
+
+          <View style={styles.ctxPill}>
+            <Text style={styles.ctxPillText}>—</Text>
+          </View>
+
+          <Pressable
+            onPress={() =>
+              Alert.alert(
+                'Voice input',
+                'Voice transcription channel ships in v2 — paste from the keyboard mic for now.',
+              )
+            }
+            hitSlop={8}
+            style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
+            <Icon name="mic" size={18} color={colors.fg45} />
+          </Pressable>
+
+          <Pressable
+            onPress={onSend}
+            disabled={sendDisabled}
+            style={({ pressed }) => [
+              styles.sendBtn,
+              sendDisabled && styles.sendBtnDisabled,
+              pressed && !sendDisabled && { opacity: 0.85 },
+            ]}>
+            {isSending ? (
+              <ActivityIndicator color={colors.bg} size="small" />
+            ) : (
+              <Icon name="arrow.up" size={16} color={sendDisabled ? colors.fg45 : colors.bg} />
+            )}
+          </Pressable>
+        </View>
+      </View>
+
+      <PlusMenu
+        visible={plusOpen}
+        planArmed={planArmed}
+        onClose={() => setPlusOpen(false)}
+        onTogglePlan={() => {
+          onTogglePlan();
+          setPlusOpen(false);
+        }}
+        onPickImages={() => {
+          setPlusOpen(false);
+          onPickImages();
+        }}
+        onTakePhoto={() => {
+          setPlusOpen(false);
+          onTakePhoto();
+        }}
+      />
+    </View>
+  );
+}
+
+// Bottom-sheet menu mirroring the SwiftUI Menu attached to the iOS "+" button.
+// Plain Modal + tap-outside-to-dismiss; no native action sheet because Android
+// doesn't surface one identical to iOS.
+function PlusMenu({
+  visible,
+  planArmed,
+  onClose,
+  onTogglePlan,
+  onPickImages,
+  onTakePhoto,
+}: {
+  visible: boolean;
+  planArmed: boolean;
+  onClose: () => void;
+  onTogglePlan: () => void;
+  onPickImages: () => void;
+  onTakePhoto: () => void;
 }) {
   return (
-    <View style={styles.composerBar}>
-      <TextInput
-        style={styles.composerInput}
-        value={text}
-        onChangeText={onChange}
-        placeholder="Send a prompt to Codex…"
-        placeholderTextColor={colors.fg40}
-        multiline
-        editable={!disabled}
-        autoCapitalize="none"
-        autoCorrect={false}
-      />
-      <Pressable
-        onPress={onSend}
-        disabled={disabled || !text.trim()}
-        style={({ pressed }) => [
-          styles.composerSendBtn,
-          (disabled || !text.trim()) && { opacity: 0.4 },
-          pressed && { opacity: 0.7 },
-        ]}>
-        {disabled ? (
-          <ActivityIndicator color={colors.bg} size="small" />
-        ) : (
-          <Icon name="qrcode" size={16} color={colors.bg} />
-        )}
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={styles.plusMenuBackdrop} onPress={onClose}>
+        <Pressable style={styles.plusMenu} onPress={(e) => e.stopPropagation()}>
+          <PlusMenuRow
+            icon="checklist"
+            label={planArmed ? 'Plan mode (on)' : 'Plan mode'}
+            tint={planArmed ? colors.plan : colors.fg}
+            onPress={onTogglePlan}
+          />
+          <View style={styles.plusMenuDivider} />
+          <PlusMenuRow icon="photo" label="Photo library" onPress={onPickImages} />
+          <PlusMenuRow icon="camera" label="Take a photo" onPress={onTakePhoto} />
+        </Pressable>
       </Pressable>
-    </View>
+    </Modal>
+  );
+}
+
+function PlusMenuRow({
+  icon,
+  label,
+  tint,
+  onPress,
+}: {
+  icon: string;
+  label: string;
+  tint?: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.plusMenuRow, pressed && { backgroundColor: colors.fg10 }]}>
+      <Icon name={icon} size={18} color={tint ?? colors.fg} />
+      <Text style={[styles.plusMenuLabel, tint ? { color: tint } : null]}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -1709,35 +1989,151 @@ const styles = StyleSheet.create({
     marginVertical: spacing.sm,
     borderBottomWidth: 0,
   },
-  composerBar: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: spacing.sm,
-    padding: spacing.md,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.fg10,
+  composerWrap: {
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.md,
     backgroundColor: colors.bg,
   },
-  composerInput: {
-    flex: 1,
-    minHeight: 40,
-    maxHeight: 140,
-    color: colors.fg,
-    fontSize: fontSize.body,
+  composerCard: {
     backgroundColor: colors.fg6,
-    borderRadius: radius.card,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
     borderWidth: 1,
     borderColor: colors.fg10,
+    borderRadius: 26, // matches iOS RoundedRectangle(cornerRadius: 26)
+    overflow: 'hidden',
   },
-  composerSendBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+  attachmentsRow: {
+    paddingTop: 10,
+    paddingHorizontal: 12,
+    gap: 8,
+    flexDirection: 'row',
+  },
+  attachmentTile: {
+    width: 56,
+    height: 56,
+    borderRadius: 10,
+    backgroundColor: colors.fg10,
+    overflow: 'visible',
+    position: 'relative',
+  },
+  attachmentThumb: {
+    width: 56,
+    height: 56,
+    borderRadius: 10,
+  },
+  attachmentRemove: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: colors.bg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.fg40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  composerInput: {
+    minHeight: 36,
+    maxHeight: 160,
+    color: colors.fg,
+    fontSize: fontSize.body,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 8,
+  },
+  composerBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingTop: 4,
+    paddingBottom: 8,
+  },
+  iconBtn: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modelPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 4,
+    paddingVertical: 6,
+    maxWidth: 180,
+  },
+  modelPillText: {
+    color: colors.fg70,
+    fontSize: fontSize.subheadline,
+    fontWeight: weight.regular,
+  },
+  planPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 4,
+    paddingVertical: 6,
+  },
+  planPillText: {
+    color: colors.plan,
+    fontSize: fontSize.subheadline,
+  },
+  ctxPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: colors.fg10,
+    minWidth: 22,
+    alignItems: 'center',
+  },
+  ctxPillText: {
+    color: colors.fg45,
+    fontSize: fontSize.caption,
+    fontFamily: 'Menlo',
+  },
+  sendBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     backgroundColor: colors.fg,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  sendBtnDisabled: {
+    backgroundColor: colors.fg10,
+  },
+  plusMenuBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+    padding: spacing.md,
+    paddingBottom: spacing.xl,
+  },
+  plusMenu: {
+    backgroundColor: colors.bg,
+    borderRadius: radius.card,
+    borderWidth: 1,
+    borderColor: colors.fg10,
+    overflow: 'hidden',
+  },
+  plusMenuRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingVertical: 14,
+    paddingHorizontal: spacing.lg,
+  },
+  plusMenuLabel: {
+    color: colors.fg,
+    fontSize: fontSize.body,
+  },
+  plusMenuDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: colors.fg10,
+    marginHorizontal: spacing.lg,
   },
   approvalCard: {
     backgroundColor: colors.fg6,
