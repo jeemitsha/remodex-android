@@ -4,6 +4,7 @@ import {
   applyGroupLimit,
   filterActiveThreads,
   groupThreadsByProject,
+  isAdHocCodexCwd,
   isLikelyFilesystemPath,
   normalizeProjectPath,
   relativeTime,
@@ -169,6 +170,28 @@ describe('filterActiveThreads (drops by id-set)', () => {
   it('returns the input unchanged when the archived set is empty', () => {
     const input = [{ id: 'a' }, { id: 'b' }];
     expect(filterActiveThreads(input, new Set())).toBe(input);
+  });
+});
+
+describe('isAdHocCodexCwd', () => {
+  it('matches /Documents/Codex/<date>/<slug> auto-generated paths', () => {
+    expect(isAdHocCodexCwd('/Users/jeetshah/Documents/Codex/2026-05-06/how-long-can-aurora-rds')).toBe(true);
+    expect(isAdHocCodexCwd('/Users/x/Documents/Codex/2025-12-31/some-slug')).toBe(true);
+  });
+
+  it('matches /.codex/sessions/ rollout paths', () => {
+    expect(isAdHocCodexCwd('/Users/jeetshah/.codex/sessions/2026/05/06/foo.jsonl')).toBe(true);
+  });
+
+  it('returns false for real project paths', () => {
+    expect(isAdHocCodexCwd('/Users/jeetshah/Codebase/Nidana/Nidana')).toBe(false);
+    expect(isAdHocCodexCwd('/Users/x/Trading/speedrunner-fullstack-app')).toBe(false);
+    expect(isAdHocCodexCwd(undefined)).toBe(false);
+  });
+
+  it('falls into the Chats bucket via normalizeProjectPath', () => {
+    expect(normalizeProjectPath('/Users/jeetshah/Documents/Codex/2026-05-06/foo')).toBeNull();
+    expect(normalizeProjectPath('/Users/jeetshah/Codebase/Nidana/Nidana')).toBe('/Users/jeetshah/Codebase/Nidana/Nidana');
   });
 });
 

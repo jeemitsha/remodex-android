@@ -501,53 +501,6 @@ export default function PairScreen() {
         : new Set<string>();
       const threads = allThreads.filter((t) => !archivedIds.has(t.id));
 
-      if (__DEV__) {
-        // Diagnostic dump: helps figure out why the archive filter / Chats
-        // bucket aren't behaving as expected. Run with `npx expo start --lan`
-        // and watch the terminal that ran it.
-        console.log('[remodex/threads] active call returned', allThreads.length, 'threads');
-        console.log('[remodex/threads] archived call ok=', archivedResp.ok,
-          'count=', archivedIds.size);
-        console.log('[remodex/threads] after archive filter:', threads.length);
-        const sampleRaw = (listResp.result as any)?.data?.[0]
-          ?? (listResp.result as any)?.items?.[0]
-          ?? (listResp.result as any)?.threads?.[0];
-        if (sampleRaw) {
-          console.log('[remodex/threads] sample raw thread KEYS =', Object.keys(sampleRaw));
-          console.log('[remodex/threads] sample raw thread =', JSON.stringify(sampleRaw, null, 2));
-        }
-        const sampleArchivedRaw = archivedResp.ok
-          ? ((archivedResp.result as any)?.data?.[0]
-              ?? (archivedResp.result as any)?.items?.[0]
-              ?? (archivedResp.result as any)?.threads?.[0])
-          : null;
-        if (sampleArchivedRaw) {
-          console.log('[remodex/threads] sample ARCHIVED raw thread =',
-            JSON.stringify(sampleArchivedRaw, null, 2));
-        }
-        // Look for any field on every thread that could distinguish a chat
-        // (cwd alone might not — bridge might use `source`, `archivedAt`, etc.)
-        const fieldCounts = new Map<string, number>();
-        const rawArr = (listResp.result as any)?.data
-          ?? (listResp.result as any)?.items
-          ?? (listResp.result as any)?.threads
-          ?? [];
-        for (const t of rawArr) {
-          if (!t || typeof t !== 'object') continue;
-          for (const k of Object.keys(t)) {
-            fieldCounts.set(k, (fieldCounts.get(k) ?? 0) + 1);
-          }
-        }
-        console.log('[remodex/threads] field frequency:',
-          Array.from(fieldCounts.entries()).sort((a, b) => b[1] - a[1]));
-        console.log('[remodex/threads] cwd values (deduped):',
-          Array.from(new Set(allThreads.map((t) => t.cwd ?? '<missing>'))).slice(0, 20));
-        console.log('[remodex/threads] status values (deduped):',
-          Array.from(new Set(allThreads.map((t) => t.status ?? '<missing>'))));
-        console.log('[remodex/threads] source values (deduped):',
-          Array.from(new Set(allThreads.map((t) => (t as any).source ?? '<missing>'))));
-      }
-
       if (!cancelled) {
         setStatus({
           kind: 'sessions-ready',
@@ -2599,7 +2552,7 @@ function MessageBubble({ turn, side }: { turn: TurnRow; side: 'left' | 'right' }
 // individually expandable into a fixed-height diff viewer; tapping the
 // expand-arrow grows the diff to its full content.
 function FileChangeSummaryCard({ fileChanges }: { fileChanges: FileChange[] }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const totals = useMemo(
     () =>
       fileChanges.reduce(
@@ -2643,7 +2596,9 @@ function FileChangeRow({ change }: { change: FileChange }) {
       <Pressable
         onPress={() => setOpen((v) => !v)}
         style={({ pressed }) => [styles.fcRow, pressed && { opacity: 0.7 }]}>
-        <Text style={styles.fcRowPath} numberOfLines={1}>{change.path}</Text>
+        <Text style={styles.fcRowPath} numberOfLines={1} ellipsizeMode="middle">
+          {shortenPath(change.path, 3)}
+        </Text>
         {change.additions > 0 ? <Text style={styles.fcAdds}>+{change.additions}</Text> : null}
         {change.deletions > 0 ? <Text style={styles.fcDels}>-{change.deletions}</Text> : null}
         <Text style={styles.fcRowChevron}>{open ? '▾' : '▸'}</Text>
@@ -2748,6 +2703,16 @@ function formatTimeOfDay(epochMs: number): string {
 function ToolGroupChild({ turn }: { turn: TurnRow }) {
   const [expanded, setExpanded] = useState(false);
   const exitOk = turn.exitCode === undefined ? null : turn.exitCode === 0;
+  const isFileTool = turn.toolKind === 'file' && (turn.fileChanges?.length ?? 0) > 0;
+  const labelText = isFileTool
+    ? shortenPath(turn.fileChanges![0].path)
+    : turn.command || '(tool)';
+  const totalAdds = isFileTool
+    ? turn.fileChanges!.reduce((s, c) => s + c.additions, 0)
+    : 0;
+  const totalDels = isFileTool
+    ? turn.fileChanges!.reduce((s, c) => s + c.deletions, 0)
+    : 0;
   return (
     <View style={styles.toolChild}>
       <Pressable
@@ -2755,38 +2720,82 @@ function ToolGroupChild({ turn }: { turn: TurnRow }) {
         style={({ pressed }) => [styles.toolChildHeader, pressed && { opacity: 0.7 }]}>
         <Text style={styles.toolGroupChevron}>{expanded ? '▾' : '▸'}</Text>
         <Text style={styles.toolChildCommand} numberOfLines={1} ellipsizeMode="middle">
-          {turn.command || '(tool)'}
+          {labelText}
         </Text>
-        <Text
-          style={[
-            styles.toolChildStatus,
-            exitOk === false ? { color: '#ff8b8b' } : { color: colors.fg45 },
-          ]}>
-          {exitOk === true
-            ? '✓'
-            : exitOk === false
-              ? `✕${turn.exitCode}`
-              : turn.toolStatus || ''}
-        </Text>
+        {isFileTool ? (
+          <>
+            {totalAdds > 0 ? <Text style={styles.fcAdds}>+{totalAdds}</Text> : null}
+            {totalDels > 0 ? <Text style={styles.fcDels}>-{totalDels}</Text> : null}
+          </>
+        ) : (
+          <Text
+            style={[
+              styles.toolChildStatus,
+              exitOk === false ? { color: '#ff8b8b' } : { color: colors.fg45 },
+            ]}>
+            {exitOk === true
+              ? '✓'
+              : exitOk === false
+                ? `✕${turn.exitCode}`
+                : turn.toolStatus || ''}
+          </Text>
+        )}
         {turn.durationMs ? (
           <Text style={styles.toolChildDuration}>{formatDuration(turn.durationMs)}</Text>
         ) : null}
       </Pressable>
       {expanded ? (
         <View style={styles.toolChildBody}>
-          {turn.command ? (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ paddingRight: spacing.md }}>
-              <Text style={styles.cmdCommand}>{`$ ${turn.command}`}</Text>
-            </ScrollView>
-          ) : null}
-          {turn.output ? <CommandOutput text={turn.output} /> : null}
+          {isFileTool ? (
+            <View style={{ gap: 6 }}>
+              {turn.fileChanges!.map((c) => (
+                <View key={c.path} style={styles.fcDiffBox}>
+                  <View style={styles.toolFileHeader}>
+                    <Text style={styles.toolFileHeaderPath} numberOfLines={1} ellipsizeMode="middle">
+                      {shortenPath(c.path)}
+                    </Text>
+                    {c.additions > 0 ? <Text style={styles.fcAdds}>+{c.additions}</Text> : null}
+                    {c.deletions > 0 ? <Text style={styles.fcDels}>-{c.deletions}</Text> : null}
+                  </View>
+                  {c.diff ? (
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                      <ScrollView style={styles.fcDiffScroll} showsVerticalScrollIndicator>
+                        <DiffLines diff={c.diff} />
+                      </ScrollView>
+                    </ScrollView>
+                  ) : (
+                    <Text style={styles.fcDiffEmpty}>No diff payload — bridge omitted patch text.</Text>
+                  )}
+                </View>
+              ))}
+            </View>
+          ) : (
+            <>
+              {turn.command ? (
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={{ paddingRight: spacing.md }}>
+                  <Text style={styles.cmdCommand}>{`$ ${turn.command}`}</Text>
+                </ScrollView>
+              ) : null}
+              {turn.output ? <CommandOutput text={turn.output} /> : null}
+            </>
+          )}
         </View>
       ) : null}
     </View>
   );
+}
+
+// Renders a long absolute path as the last 2-3 segments so it stays readable
+// in narrow row layouts. /Users/x/Codebase/Nidana/Nidana/api/src/users/users.service.ts
+// → "users/users.service.ts".
+function shortenPath(path: string, segments: number = 2): string {
+  if (!path) return '';
+  const parts = path.split('/').filter(Boolean);
+  if (parts.length <= segments) return parts.join('/');
+  return parts.slice(-segments).join('/');
 }
 
 function CommandOutput({ text }: { text: string }) {
@@ -3549,6 +3558,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: 10,
     fontStyle: 'italic',
+  },
+  toolFileHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.fg10,
+  },
+  toolFileHeaderPath: {
+    flex: 1,
+    color: colors.fg70,
+    fontSize: fontSize.caption,
+    fontFamily: 'Menlo',
   },
   fcDiffExpand: {
     paddingVertical: 6,

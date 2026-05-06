@@ -27,11 +27,29 @@ export function isLikelyFilesystemPath(value: string): boolean {
   return false;
 }
 
+// Codex auto-generates a `cwd` for ad-hoc chats started without a project,
+// using one of two patterns:
+//   - $HOME/Documents/Codex/<YYYY-MM-DD>/<slug>      (CLI / VS Code "new chat")
+//   - $HOME/.codex/sessions/<YYYY>/<MM>/<DD>/...     (rollout file's parent)
+//
+// These aren't real projects — bucket them into the "Chats" section instead
+// of letting them spawn one-off project groups in the sidebar.
+const AD_HOC_PATH_PATTERNS: RegExp[] = [
+  /\/Documents\/Codex\/\d{4}-\d{2}-\d{2}\//, // /Users/x/Documents/Codex/2026-05-06/<slug>
+  /\/\.codex\/sessions\//,                   // /Users/x/.codex/sessions/...
+];
+
+export function isAdHocCodexCwd(cwd: string | undefined): boolean {
+  if (!cwd) return false;
+  return AD_HOC_PATH_PATTERNS.some((rx) => rx.test(cwd));
+}
+
 export function normalizeProjectPath(cwd: string | undefined): string | null {
   if (!cwd) return null;
   const trimmed = cwd.trim().replace(/\/+$/, '');
   if (!trimmed) return null;
   if (!isLikelyFilesystemPath(trimmed)) return null;
+  if (isAdHocCodexCwd(trimmed)) return null;
   return trimmed;
 }
 
