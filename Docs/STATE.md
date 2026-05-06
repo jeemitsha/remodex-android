@@ -17,6 +17,34 @@ Build a **production-quality, polished, third-party Android client** for the Rem
 
 ## Where we left off (most recent → oldest)
 
+### 2026-05-06 — late afternoon — UI rebuild against fixture-backed parsers (commit `cac2c4d`)
+
+**Just shipped**:
+- `pair.tsx` now imports `extractThreads` / `extractTurns` from `lib/protocol/extract.ts`. The wrong inline parsers are gone.
+- **Chat bubbles**: user right-aligned in plan-blue tinted bubble with rounded-top-right; assistant left-aligned in subtle dark bubble.
+- **Mini-markdown**: bubbles parse triple-backtick fenced code blocks (with optional language tag) and render them in a horizontally-scrollable monospace box. Other markdown deferred (would need `react-native-markdown-display`).
+- **Command-execution cards** (tool role): terminal-icon header, project-cwd label, `$ <command>` mono line, scrollable output (collapsible past 8 lines), green ✓ "completed" / red ✕ "exit N" status pill, duration label.
+- **System / reasoning rows**: dimmed italic, role label uppercased.
+- **Sidebar row** uses real `preview` field as subtitle (much better than the old "completed" status). Added `branch` pill from `gitInfo.branch`.
+
+**Still 51/51 tests green** (sidebar, qr, crypto, extract).
+
+**To test on phone**: reload Expo Go (shake → Reload). Trusted-session-resolve should auto-reconnect using the saved pairing (which points at the local relay we set up earlier). Then tap a thread — you should see a real chat layout, not raw JSON.
+
+**Currently running locally** (so phone can pair):
+- Local patched relay on `ws://127.0.0.1:9000/relay` (PID may vary)
+- Bridge connected to it (started via `REMODEX_RELAY=ws://127.0.0.1:9000/relay remodex up`)
+- Expo dev server on `exp://192.168.29.10:8081`
+- Daemon (`remodex run-service` on public relay) is **stopped** — restart with `remodex start` if you want the public relay back instead.
+
+**Next chunks** (do these in order, commit each):
+1. **Validate on phone** — does the chat UI now look right? Are there other issues to fix?
+2. **Real markdown rendering** for assistant messages — install `react-native-markdown-display`, replace the minimal fence parser. Tradeoff: ~50KB bundle increase, but bullet lists / headings / inline code all start working. Worth it.
+3. **Snapshot tests** — set up `@testing-library/react-native` and add tests that render `MessageBubble` / `CommandCard` / `ApprovalCard` against the fixtures. Catches "regressed JSON-dump" silently.
+4. **Compose UX polish**: send button shows ✈ icon (currently uses qrcode by accident), enter-to-send option, clear input on send (already done), optimistic user-message styling matches confirmed bubble.
+5. **Streaming chat polish**: while assistant streams, we now insert it as a "live" header above the timeline; that needs a real bubble look matching finalized assistant rows.
+6. **EAS dev build** — APK we can install standalone, drop the Expo Go dependency. Also unlocks `react-native-quick-crypto` if perf becomes a concern.
+
 ### 2026-05-06 — afternoon — automated test loop landed; parsers being fixed against real fixtures
 
 **Just shipped**:
@@ -147,3 +175,4 @@ The capture script uses an ephemeral phone identity each run, so it doesn't poll
 - **2026-05-06 morning**: scaffolded Expo, audit, protocol spec, milestones 1+2 (pair + thread list, validated on phone).
 - **2026-05-06 early afternoon**: tasks 6-10 (thread detail, compose, approval, reconnect, sidebar fidelity); upstream PR #107 opened. *Quality not yet validated; user reported regressions in next session.*
 - **2026-05-06 mid afternoon**: pivoted to test infrastructure (vitest + capture harness + fixture-backed parsers in `extract.ts`). 51 unit tests pass. Old inline parsers in `pair.tsx` not yet swapped — that's the next step.
+- **2026-05-06 late afternoon**: swapped `pair.tsx` parsers to use `extract.ts`; rebuilt thread-detail UI as chat bubbles + command-execution cards; sidebar now shows preview + branch pill. Commit `cac2c4d`. Awaiting user phone validation.
