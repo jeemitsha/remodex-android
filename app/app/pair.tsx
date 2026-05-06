@@ -238,12 +238,11 @@ export default function PairScreen() {
   // Single source of truth for the outer chat container's bottom padding:
   //   - keyboard up → use its full height (it covers the gesture-nav area)
   //   - keyboard closed → use the bottom safe-area inset
+  // The Composer has no bottom padding of its own — see composerBottomPad in
+  // the Composer component (set to spacing.sm only for breathing room).
+  // The FlatList MUST have explicit flex:1 so it fills the column; otherwise
+  // the composer rises with it and leaves empty space at the bottom.
   const chatBottomPad = keyboardHeight > 0 ? keyboardHeight : insets.bottom;
-  // Diagnostic — drop once keyboard layout is verified on phone.
-  useEffect(() => {
-    if (!__DEV__) return;
-    console.log('[remodex/kb]', { keyboardHeight, insetsBottom: insets.bottom, chatBottomPad });
-  }, [keyboardHeight, insets.bottom, chatBottomPad]);
   const [status, setStatus] = useState<Status>({ kind: 'loading' });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // Models are loaded once after `initialize` and stay valid for the whole
@@ -900,12 +899,18 @@ export default function PairScreen() {
     }
 
     if (!resp.ok) {
+      // "thread not found" = the cached thread id is stale (bridge restarted
+      // and re-issued ids). Show a clearer error + nudge to refresh.
+      const isStaleThread = /thread not found/i.test(resp.error.message || '');
+      const friendlyMsg = isStaleThread
+        ? 'This thread is no longer on the bridge (probably restarted since you cached it). Tap ☰ → Re-pair to refresh, or just open another thread.'
+        : `[turn/start failed] ${resp.error.message}`;
       setStatus((prev) => {
         if (prev.kind !== 'thread-ready') return prev;
         const errTurn: TurnRow = {
           id: `send-err-${Date.now()}`,
           role: 'system',
-          text: `[turn/start failed] ${resp.error.message}`,
+          text: friendlyMsg,
           raw: resp.error,
         };
         return {
@@ -914,6 +919,25 @@ export default function PairScreen() {
           isSending: false,
         };
       });
+      // Auto-refresh thread list when the bridge says the thread is gone —
+      // helps when a stale cached id is the only blocker.
+      if (isStaleThread) {
+        const client2 = clientRef.current;
+        if (client2) {
+          void (async () => {
+            const listResp = await client2.sendRequest('thread/list', { limit: 50 });
+            if (!listResp.ok) return;
+            const fresh = extractThreads(listResp.result);
+            setStatus((prev) => {
+              if (prev.kind !== 'thread-ready') return prev;
+              return { ...prev, threads: fresh };
+            });
+            if (macDeviceIdRef.current) {
+              void saveThreadsCache(macDeviceIdRef.current, fresh);
+            }
+          })();
+        }
+      }
     }
   }
 
@@ -1264,6 +1288,13 @@ export default function PairScreen() {
           {status.kind === 'thread-ready' && (
             <View style={{ flex: 1 }}>
               <FlatList
+                // CRITICAL: explicit flex:1 so the list fills the available
+                // column space. Without it, an inverted FlatList with few
+                // items shrinks to content height — the Composer then stacks
+                // *below* it but still at the top of the column, leaving
+                // empty space at the bottom that looks like the input is
+                // "flying" above the keyboard.
+                style={{ flex: 1 }}
                 // Standard chat-app pattern: inverted FlatList renders the
                 // first data item at the BOTTOM of the viewport. We pass
                 // turns newest-first so the latest message lands at the
