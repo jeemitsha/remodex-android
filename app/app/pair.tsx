@@ -73,6 +73,11 @@ import {
   saveSavedPairing,
 } from '@/lib/state/savedPairing';
 import { loadThreadsCache, saveThreadsCache } from '@/lib/state/threadsCache';
+import {
+  archiveProject,
+  loadArchivedProjects,
+  unarchiveProject,
+} from '@/lib/state/archivedProjects';
 import { colors, fontSize, radius, spacing, weight } from '@/lib/theme/tokens';
 
 // Thread/turn types and parsers live in lib/protocol/extract.ts so they can be
@@ -212,6 +217,10 @@ export default function PairScreen() {
   // Populated once during the bootstrap effect; superseded by status.threads
   // as soon as the bridge responds.
   const [cachedThreads, setCachedThreads] = useState<ThreadRow[] | null>(null);
+  // Project paths the user has manually archived from the sidebar via
+  // long-press. Filtered out at render time; revealed by toggling
+  // "Show archived projects" in the drawer footer.
+  const [archivedProjectPaths, setArchivedProjectPaths] = useState<Set<string>>(new Set());
   const clientRef = useRef<RelayClient | null>(null);
   const pairingRef = useRef<PairingContext | null>(null);
   const modeRef = useRef<HandshakeMode>('qr_bootstrap');
@@ -241,6 +250,10 @@ export default function PairScreen() {
           void loadThreadsCache(saved.macDeviceId).then((entry) => {
             if (cancelled || !entry) return;
             setCachedThreads(entry.threads);
+          });
+          void loadArchivedProjects(saved.macDeviceId).then((set) => {
+            if (cancelled) return;
+            setArchivedProjectPaths(set);
           });
           // Always ask the relay for the *current* sessionId for this trusted
           // Mac before connecting. The saved sessionId is from a previous
@@ -366,6 +379,9 @@ export default function PairScreen() {
                 mode,
               });
               macDeviceIdRef.current = event.session.macDeviceId;
+              void loadArchivedProjects(event.session.macDeviceId).then((set) =>
+                setArchivedProjectPaths(set),
+              );
               // Save now so future launches can auto-resume.
               void saveSavedPairing({
                 relay: pairing!.relay,
@@ -845,6 +861,18 @@ export default function PairScreen() {
     setStatus((prev) => (prev.kind === 'thread-ready' ? { ...prev, planArmed: armed } : prev));
   }
 
+  async function archiveProjectLocally(projectPath: string) {
+    if (!macDeviceIdRef.current) return;
+    const next = await archiveProject(macDeviceIdRef.current, projectPath);
+    setArchivedProjectPaths(next);
+  }
+
+  async function unarchiveProjectLocally(projectPath: string) {
+    if (!macDeviceIdRef.current) return;
+    const next = await unarchiveProject(macDeviceIdRef.current, projectPath);
+    setArchivedProjectPaths(next);
+  }
+
   function setSelection(update: (sel: RuntimeSelection) => RuntimeSelection) {
     setStatus((prev) =>
       prev.kind === 'thread-ready' ? { ...prev, selection: update(prev.selection) } : prev,
@@ -1310,6 +1338,9 @@ export default function PairScreen() {
               ? status.thread.id
               : null
           }
+          archivedProjectPaths={archivedProjectPaths}
+          onArchiveProject={archiveProjectLocally}
+          onUnarchiveProject={unarchiveProjectLocally}
           onSelect={openThread}
           onClose={() => setSidebarOpen(false)}
           onRescan={rescan}
@@ -1382,6 +1413,7 @@ type SidebarSection = {
   hiddenCount: number;
   totalCount: number;
   isChats: boolean;
+  isArchivable: boolean; // false for the synthetic "Chats" section
   data: ThreadRow[];
 };
 
@@ -1395,12 +1427,20 @@ function buildSidebarSections(
   limit: number,
   expandedKeys: ReadonlySet<string>,
   activeThreadId: string | null,
+  archivedProjectPaths: ReadonlySet<string>,
+  showArchived: boolean,
 ): SidebarSection[] {
   const { projects, chats } = splitProjectsAndChats(threads);
   const pinned = activeThreadId ? new Set([activeThreadId]) : undefined;
 
+  // Split projects into live vs archived buckets. Archived projects only
+  // surface when the user toggles "Show archived" in the drawer footer.
+  const liveProjects = projects.filter((g) => !archivedProjectPaths.has(g.fullPath));
+  const archivedProjects = projects.filter((g) => archivedProjectPaths.has(g.fullPath));
+
+  const visibleProjects = showArchived ? archivedProjects : liveProjects;
   const projectSections: SidebarSection[] = applyGroupLimit(
-    projects,
+    visibleProjects,
     limit,
     expandedKeys,
     pinned,
@@ -1411,10 +1451,13 @@ function buildSidebarSections(
     hiddenCount: g.hiddenCount,
     totalCount: g.threads.length,
     isChats: false,
+    isArchivable: true,
     data: g.visible,
   }));
 
-  if (chats.length === 0) return projectSections;
+  // When showing archived, skip the Chats section — it's only relevant in
+  // the live view.
+  if (showArchived || chats.length === 0) return projectSections;
 
   // Chats section at the bottom — same limit, also honors the active-thread pin.
   const chatsExpanded = expandedKeys.has('__chats__');
@@ -1436,6 +1479,7 @@ function buildSidebarSections(
     hiddenCount: chatsHidden,
     totalCount: chats.length,
     isChats: true,
+    isArchivable: false,
     data: chatVisible,
   });
   return projectSections;
@@ -1447,6 +1491,9 @@ function SidebarDrawer({
   visible,
   threads,
   activeThreadId,
+  archivedProjectPaths,
+  onArchiveProject,
+  onUnarchiveProject,
   onSelect,
   onClose,
   onRescan,
@@ -1454,10 +1501,14 @@ function SidebarDrawer({
   visible: boolean;
   threads: ThreadRow[];
   activeThreadId: string | null;
+  archivedProjectPaths: ReadonlySet<string>;
+  onArchiveProject: (path: string) => void;
+  onUnarchiveProject: (path: string) => void;
   onSelect: (t: ThreadRow) => void;
   onClose: () => void;
   onRescan: () => void;
 }) {
+  const [showArchived, setShowArchived] = useState(false);
   const screenW = Dimensions.get('window').width;
   const drawerWidth = Math.min(360, Math.round(screenW * 0.82));
   const slide = useRef(new Animated.Value(visible ? 0 : -drawerWidth)).current;
@@ -1521,19 +1572,47 @@ function SidebarDrawer({
               SIDEBAR_THREADS_PER_GROUP,
               expandedGroups,
               activeThreadId,
+              archivedProjectPaths,
+              showArchived,
             )}
             keyExtractor={(t, i) => t.id || `thread-${i}`}
             stickySectionHeadersEnabled={false}
-            renderSectionHeader={({ section }) => (
-              <View style={section.isChats ? styles.chatsSectionHeader : styles.projectSectionHeader}>
-                <Text
-                  style={section.isChats ? styles.chatsSectionLabel : styles.projectSectionLabel}
-                  numberOfLines={1}>
-                  {section.label}
-                </Text>
-                <Text style={styles.projectSectionCount}>{section.totalCount}</Text>
-              </View>
-            )}
+            renderSectionHeader={({ section }) =>
+              section.isArchivable ? (
+                <Pressable
+                  onLongPress={() => {
+                    Alert.alert(
+                      showArchived ? 'Unarchive project' : 'Archive project',
+                      section.fullPath || section.label,
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        {
+                          text: showArchived ? 'Unarchive' : 'Archive',
+                          style: showArchived ? 'default' : 'destructive',
+                          onPress: () => {
+                            if (showArchived) onUnarchiveProject(section.fullPath);
+                            else onArchiveProject(section.fullPath);
+                          },
+                        },
+                      ],
+                    );
+                  }}
+                  delayLongPress={350}
+                  style={styles.projectSectionHeader}>
+                  <Text style={styles.projectSectionLabel} numberOfLines={1}>
+                    {section.label}
+                  </Text>
+                  <Text style={styles.projectSectionCount}>{section.totalCount}</Text>
+                </Pressable>
+              ) : (
+                <View style={styles.chatsSectionHeader}>
+                  <Text style={styles.chatsSectionLabel} numberOfLines={1}>
+                    {section.label}
+                  </Text>
+                  <Text style={styles.projectSectionCount}>{section.totalCount}</Text>
+                </View>
+              )
+            }
             renderSectionFooter={({ section }) =>
               section.hiddenCount > 0 || (expandedGroups.has(section.key) && section.totalCount > SIDEBAR_THREADS_PER_GROUP) ? (
                 <Pressable
@@ -1562,6 +1641,17 @@ function SidebarDrawer({
           />
         )}
         <View style={styles.drawerFooter}>
+          {archivedProjectPaths.size > 0 ? (
+            <Pressable
+              onPress={() => setShowArchived((v) => !v)}
+              style={({ pressed }) => [styles.footerBtnGhost, pressed && { opacity: 0.6 }]}>
+              <Text style={styles.footerBtnGhostText}>
+                {showArchived
+                  ? '← Live projects'
+                  : `Show archived (${archivedProjectPaths.size})`}
+              </Text>
+            </Pressable>
+          ) : null}
           <Pressable onPress={onRescan} style={styles.footerBtn}>
             <Text style={styles.footerBtnText}>Re-pair</Text>
           </Pressable>
@@ -3166,6 +3256,15 @@ const styles = StyleSheet.create({
     color: colors.fg,
     textAlign: 'center',
     fontWeight: weight.semibold,
+  },
+  footerBtnGhost: {
+    paddingVertical: 10,
+    marginBottom: 6,
+  },
+  footerBtnGhostText: {
+    color: colors.fg45,
+    textAlign: 'center',
+    fontSize: fontSize.subheadline,
   },
   threadHeaderBar: {
     flexDirection: 'row',
