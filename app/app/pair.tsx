@@ -71,6 +71,7 @@ import {
   loadSavedPairing,
   saveSavedPairing,
 } from '@/lib/state/savedPairing';
+import { loadThreadsCache, saveThreadsCache } from '@/lib/state/threadsCache';
 import { colors, fontSize, radius, spacing, weight } from '@/lib/theme/tokens';
 
 // Thread/turn types and parsers live in lib/protocol/extract.ts so they can be
@@ -192,9 +193,16 @@ export default function PairScreen() {
   // session. Kept in component state (not a ref) so the model-pill label
   // re-renders when the bridge response lands.
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
+  // Threads loaded from on-disk cache for instant sidebar paint on launch.
+  // Populated once during the bootstrap effect; superseded by status.threads
+  // as soon as the bridge responds.
+  const [cachedThreads, setCachedThreads] = useState<ThreadRow[] | null>(null);
   const clientRef = useRef<RelayClient | null>(null);
   const pairingRef = useRef<PairingContext | null>(null);
   const modeRef = useRef<HandshakeMode>('qr_bootstrap');
+  // macDeviceId is needed to key the threads cache. Captured once we know
+  // the saved pairing or after a fresh QR pair.
+  const macDeviceIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -207,6 +215,14 @@ export default function PairScreen() {
       if (!pairing) {
         const saved = await loadSavedPairing();
         if (saved) {
+          // Cache hydrate: paint the sidebar from disk *before* the resolve+
+          // pair handshake. The bridge result will overwrite this once it
+          // arrives. Best-effort — failures here never break the bootstrap.
+          macDeviceIdRef.current = saved.macDeviceId;
+          void loadThreadsCache(saved.macDeviceId).then((entry) => {
+            if (cancelled || !entry) return;
+            setCachedThreads(entry.threads);
+          });
           // Always ask the relay for the *current* sessionId for this trusted
           // Mac before connecting. The saved sessionId is from a previous
           // bridge-up invocation and is almost certainly stale by now.
@@ -330,6 +346,7 @@ export default function PairScreen() {
                 pairing: pairing!,
                 mode,
               });
+              macDeviceIdRef.current = event.session.macDeviceId;
               // Save now so future launches can auto-resume.
               void saveSavedPairing({
                 relay: pairing!.relay,
@@ -473,6 +490,10 @@ export default function PairScreen() {
           threads,
           raw: listResp.result,
         });
+        setCachedThreads(null); // fresh data wins; drop the cache fallback
+        if (macDeviceIdRef.current) {
+          void saveThreadsCache(macDeviceIdRef.current, threads);
+        }
       }
     }
 
@@ -961,8 +982,19 @@ export default function PairScreen() {
     });
   }
 
+  // True while the bridge handshake / thread/list is still in flight. Drives
+  // the thin top progress bar + the stale-while-revalidate welcome render
+  // when we have on-disk cached threads to show.
+  const isHydrating =
+    status.kind === 'connecting'
+    || status.kind === 'paired'
+    || status.kind === 'sessions-loading';
+  const showCachedSidebar = isHydrating && cachedThreads !== null;
+
   return (
     <View style={styles.root}>
+      <TopProgressBar visible={isHydrating} />
+
       {status.kind === 'loading' && <Centered>Loading identity…</Centered>}
 
       {status.kind === 'no-payload' && (
@@ -973,7 +1005,19 @@ export default function PairScreen() {
         </ScrollView>
       )}
 
-      {status.kind === 'connecting' && (
+      {/* Stale-while-revalidate: when we have cached threads + the bridge is
+          still reconnecting, paint the welcome instantly (sidebar opens off
+          the cache). The thin blue bar at the top conveys "still loading". */}
+      {showCachedSidebar && (
+        <WelcomeView
+          session={null}
+          mode={modeRef.current}
+          threadCount={cachedThreads!.length}
+          onOpenSidebar={() => setSidebarOpen(true)}
+        />
+      )}
+
+      {status.kind === 'connecting' && !showCachedSidebar && (
         <ScrollView contentContainerStyle={styles.body}>
           <Text style={styles.title}>
             {modeRef.current === 'trusted_reconnect' ? 'Reconnecting…' : 'Pairing…'}
@@ -994,9 +1038,9 @@ export default function PairScreen() {
         </ScrollView>
       )}
 
-      {status.kind === 'paired' && <Centered>Paired ✓ — fetching sessions…</Centered>}
+      {status.kind === 'paired' && !showCachedSidebar && <Centered>Paired ✓ — fetching sessions…</Centered>}
 
-      {status.kind === 'sessions-loading' && (
+      {status.kind === 'sessions-loading' && !showCachedSidebar && (
         <ScrollView contentContainerStyle={styles.body}>
           <PairedHeader session={status.session} mode={status.mode} />
           <View style={styles.row}>
@@ -1132,17 +1176,26 @@ export default function PairScreen() {
   );
 }
 
+// `session` is null while the bridge is still handshaking — in that mode we
+// render a "stale" welcome from cached thread counts so the screen isn't
+// blank. The TopProgressBar at the screen root signals "still loading".
 function WelcomeView({
   session,
   mode,
   threadCount,
   onOpenSidebar,
 }: {
-  session: SecureSession;
+  session: SecureSession | null;
   mode: HandshakeMode;
   threadCount: number;
   onOpenSidebar: () => void;
 }) {
+  const titleLabel = !session
+    ? 'Reconnecting'
+    : mode === 'trusted_reconnect' ? 'Reconnected' : 'Paired';
+  const subtitle = session
+    ? `End-to-end encrypted with ${fingerprint(session.macIdentityPublicKey)}`
+    : 'Loading the latest threads from your Mac…';
   return (
     <View style={styles.welcomeRoot}>
       <Pressable onPress={onOpenSidebar} hitSlop={12} style={styles.welcomeHamburger}>
@@ -1153,12 +1206,8 @@ function WelcomeView({
         <View style={styles.welcomeIconBubble}>
           <Icon name="checkmark" size={36} color={colors.bg} />
         </View>
-        <Text style={styles.welcomeTitle}>
-          {mode === 'trusted_reconnect' ? 'Reconnected' : 'Paired'}
-        </Text>
-        <Text style={styles.welcomeSub}>
-          End-to-end encrypted with {fingerprint(session.macIdentityPublicKey)}
-        </Text>
+        <Text style={styles.welcomeTitle}>{titleLabel}</Text>
+        <Text style={styles.welcomeSub}>{subtitle}</Text>
         <Text style={styles.welcomeCount}>
           {threadCount} thread{threadCount === 1 ? '' : 's'} ready
         </Text>
@@ -2069,6 +2118,52 @@ function VoiceRecorderModal({
         </Pressable>
       </Pressable>
     </Modal>
+  );
+}
+
+// Thin indeterminate progress bar pinned to the top of the viewport. Shown
+// while we're in "stale-while-revalidate" mode — i.e. the sidebar is rendered
+// from on-disk cache and the bridge handshake / thread/list is still in flight.
+// 2px tall, slides a 30%-wide highlight strip left → right repeatedly.
+function TopProgressBar({ visible }: { visible: boolean }) {
+  const slide = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (!visible) return;
+    slide.setValue(0);
+    const loop = Animated.loop(
+      Animated.timing(slide, {
+        toValue: 1,
+        duration: 1200,
+        useNativeDriver: true,
+      }),
+    );
+    loop.start();
+    return () => {
+      loop.stop();
+    };
+  }, [visible, slide]);
+
+  if (!visible) return null;
+
+  return (
+    <View style={styles.topProgressTrack} pointerEvents="none">
+      <Animated.View
+        style={[
+          styles.topProgressFill,
+          {
+            transform: [
+              {
+                translateX: slide.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: ['-100%', '350%'],
+                }),
+              },
+            ],
+          },
+        ]}
+      />
+    </View>
   );
 }
 
@@ -3030,6 +3125,24 @@ const styles = StyleSheet.create({
   voiceSecondaryBtnText: {
     color: colors.fg,
     fontSize: fontSize.body,
+  },
+  topProgressTrack: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 3,
+    backgroundColor: 'transparent',
+    overflow: 'hidden',
+    zIndex: 100,
+    elevation: 100, // Android — sit above other absolutely-positioned views
+  },
+  topProgressFill: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: '30%',
+    backgroundColor: colors.plan,
   },
   approvalCard: {
     backgroundColor: colors.fg6,
