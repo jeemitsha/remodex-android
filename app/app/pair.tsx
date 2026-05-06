@@ -15,10 +15,13 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -93,6 +96,10 @@ type Status =
       thread: ThreadRow;
       turns: TurnRow[];
       rawTurns: unknown;
+      composer: string;
+      activeTurnId: string | null;
+      streamingText: string;
+      isSending: boolean;
     }
   | {
       kind: 'thread-error';
@@ -212,6 +219,7 @@ export default function PairScreen() {
               if (__DEV__) {
                 console.log('[remodex] notif:', event.method);
               }
+              handleNotification(event.method, event.params);
               return;
             case 'error':
               setStatus({
@@ -346,6 +354,10 @@ export default function PairScreen() {
         thread,
         turns: extractTurns(resp.result),
         rawTurns: resp.result,
+        composer: '',
+        activeTurnId: null,
+        streamingText: '',
+        isSending: false,
       });
     } else {
       setStatus({
@@ -358,6 +370,122 @@ export default function PairScreen() {
         message: `${resp.error.message} (${resp.error.code})`,
       });
     }
+  }
+
+  function handleNotification(method: string, params: unknown) {
+    setStatus((prev) => {
+      if (prev.kind !== 'thread-ready') return prev;
+      const p = (params && typeof params === 'object' ? (params as Record<string, unknown>) : {}) as Record<string, unknown>;
+      const threadId = typeof p.threadId === 'string' ? p.threadId : undefined;
+      // Only act on notifications for the open thread.
+      if (threadId && threadId !== prev.thread.id) return prev;
+
+      switch (method) {
+        case 'turn/started': {
+          const turnId = pickString(p.turnId, p.id);
+          return { ...prev, activeTurnId: turnId, streamingText: '' };
+        }
+        case 'item/agentMessage/delta':
+        case 'codex/event/agent_message_delta': {
+          const delta = pickString(p.delta, p.text, p.chunk, p.deltaText);
+          if (!delta) return prev;
+          return { ...prev, streamingText: prev.streamingText + delta };
+        }
+        case 'item/completed':
+        case 'codex/event/agent_message':
+        case 'codex/event/item_completed': {
+          // If we got a final assistant message, prefer it over our streaming buffer.
+          const finalText = pickString(p.text, p.message, p.content)
+            || (p.item && typeof p.item === 'object' ? pickString((p.item as any).text, (p.item as any).content) : '')
+            || prev.streamingText;
+          if (!finalText) return prev;
+          const newTurn: TurnRow = {
+            id: pickString(p.id, p.itemId, prev.activeTurnId, `live-${Date.now()}`),
+            role: 'assistant',
+            text: finalText,
+            raw: p,
+          };
+          return {
+            ...prev,
+            turns: [newTurn, ...prev.turns],
+            streamingText: '',
+          };
+        }
+        case 'turn/completed':
+          return { ...prev, activeTurnId: null, streamingText: '', isSending: false };
+        case 'turn/failed':
+        case 'error':
+        case 'codex/event/error': {
+          const msg = pickString(p.message, p.error, 'turn failed');
+          const errTurn: TurnRow = {
+            id: `err-${Date.now()}`,
+            role: 'system',
+            text: `[error] ${msg}`,
+            raw: p,
+          };
+          return {
+            ...prev,
+            turns: [errTurn, ...prev.turns],
+            activeTurnId: null,
+            streamingText: '',
+            isSending: false,
+          };
+        }
+        default:
+          return prev;
+      }
+    });
+  }
+
+  async function sendPrompt() {
+    const cur = status;
+    if (cur.kind !== 'thread-ready') return;
+    const text = cur.composer.trim();
+    if (!text || cur.isSending) return;
+    const client = clientRef.current;
+    if (!client) return;
+
+    // Optimistically render the user message immediately.
+    const optimisticUser: TurnRow = {
+      id: `local-${Date.now()}`,
+      role: 'user',
+      text,
+      raw: null,
+    };
+    setStatus({
+      ...cur,
+      turns: [optimisticUser, ...cur.turns],
+      composer: '',
+      isSending: true,
+      streamingText: '',
+      activeTurnId: null,
+    });
+
+    const resp = await client.sendRequest('turn/start', {
+      threadId: cur.thread.id,
+      input: [{ type: 'text', text }],
+    });
+
+    if (!resp.ok) {
+      setStatus((prev) => {
+        if (prev.kind !== 'thread-ready') return prev;
+        const errTurn: TurnRow = {
+          id: `send-err-${Date.now()}`,
+          role: 'system',
+          text: `[turn/start failed] ${resp.error.message}`,
+          raw: resp.error,
+        };
+        return {
+          ...prev,
+          turns: [errTurn, ...prev.turns],
+          isSending: false,
+        };
+      });
+    }
+  }
+
+  function setComposer(text: string) {
+    setStatus((prev) => (prev.kind === 'thread-ready' ? { ...prev, composer: text } : prev));
   }
 
   function closeThread() {
@@ -485,18 +613,40 @@ export default function PairScreen() {
             </View>
           )}
           {status.kind === 'thread-ready' && (
-            <FlatList
-              data={status.turns}
-              keyExtractor={(t, i) => t.id || `turn-${i}`}
-              inverted
-              ListEmptyComponent={
-                <View style={styles.empty}>
-                  <Text style={styles.body50}>This thread has no turns yet.</Text>
-                </View>
-              }
-              renderItem={({ item }) => <TurnView turn={item} />}
-              contentContainerStyle={styles.turnsPad}
-            />
+            <KeyboardAvoidingView
+              style={{ flex: 1 }}
+              behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+              keyboardVerticalOffset={0}>
+              <FlatList
+                data={status.turns}
+                keyExtractor={(t, i) => t.id || `turn-${i}`}
+                inverted
+                ListEmptyComponent={
+                  <View style={styles.empty}>
+                    <Text style={styles.body50}>This thread has no turns yet.</Text>
+                  </View>
+                }
+                ListHeaderComponent={
+                  status.streamingText ? (
+                    <View style={[styles.turnRow, styles.turnRowStreaming]}>
+                      <Text style={styles.turnRoleLabel}>assistant</Text>
+                      <Text style={styles.turnText}>
+                        {status.streamingText}
+                        <Text style={{ color: colors.fg45 }}>▍</Text>
+                      </Text>
+                    </View>
+                  ) : null
+                }
+                renderItem={({ item }) => <TurnView turn={item} />}
+                contentContainerStyle={styles.turnsPad}
+              />
+              <Composer
+                text={status.composer}
+                onChange={setComposer}
+                onSend={sendPrompt}
+                disabled={status.isSending}
+              />
+            </KeyboardAvoidingView>
           )}
         </View>
       )}
@@ -574,6 +724,55 @@ function ThreadHeader({ thread, onBack }: { thread: ThreadRow; onBack: () => voi
       </View>
     </View>
   );
+}
+
+function Composer({
+  text,
+  onChange,
+  onSend,
+  disabled,
+}: {
+  text: string;
+  onChange: (s: string) => void;
+  onSend: () => void;
+  disabled: boolean;
+}) {
+  return (
+    <View style={styles.composerBar}>
+      <TextInput
+        style={styles.composerInput}
+        value={text}
+        onChangeText={onChange}
+        placeholder="Send a prompt to Codex…"
+        placeholderTextColor={colors.fg40}
+        multiline
+        editable={!disabled}
+        autoCapitalize="none"
+        autoCorrect={false}
+      />
+      <Pressable
+        onPress={onSend}
+        disabled={disabled || !text.trim()}
+        style={({ pressed }) => [
+          styles.composerSendBtn,
+          (disabled || !text.trim()) && { opacity: 0.4 },
+          pressed && { opacity: 0.7 },
+        ]}>
+        {disabled ? (
+          <ActivityIndicator color={colors.bg} size="small" />
+        ) : (
+          <Icon name="qrcode" size={16} color={colors.bg} />
+        )}
+      </Pressable>
+    </View>
+  );
+}
+
+function pickString(...candidates: unknown[]): string {
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) return c;
+  }
+  return '';
 }
 
 function TurnView({ turn }: { turn: TurnRow }) {
@@ -900,5 +1099,42 @@ const styles = StyleSheet.create({
     color: colors.fg82,
     fontSize: fontSize.body,
     lineHeight: fontSize.body + 7,
+  },
+  turnRowStreaming: {
+    backgroundColor: colors.fg5,
+    borderRadius: radius.md,
+    padding: spacing.md,
+    marginVertical: spacing.sm,
+    borderBottomWidth: 0,
+  },
+  composerBar: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: spacing.sm,
+    padding: spacing.md,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.fg10,
+    backgroundColor: colors.bg,
+  },
+  composerInput: {
+    flex: 1,
+    minHeight: 40,
+    maxHeight: 140,
+    color: colors.fg,
+    fontSize: fontSize.body,
+    backgroundColor: colors.fg6,
+    borderRadius: radius.card,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.fg10,
+  },
+  composerSendBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.fg,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });
