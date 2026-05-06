@@ -10,6 +10,13 @@
 //
 // After pair: send `initialize`, then `thread/list`, render the result.
 
+import {
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  useAudioRecorder,
+  useAudioRecorderState,
+} from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
@@ -33,6 +40,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import Svg, { Circle } from 'react-native-svg';
 
 import Markdown from 'react-native-markdown-display';
 
@@ -95,6 +103,12 @@ import {
   encodeAttachmentToDataURL,
   shouldRetryWithImageURLKey,
 } from '@/lib/protocol/attachments';
+import {
+  VOICE_LIMITS,
+  VoiceAuthExpired,
+  postTranscribe,
+  preflightVoiceClip,
+} from '@/lib/protocol/voice';
 
 // How many threads each project section shows by default in the sidebar drawer.
 // Tap "Show all (N)" on a section to reveal the rest. Mirrors the leaner
@@ -751,6 +765,61 @@ export default function PairScreen() {
     );
   }
 
+  async function transcribeVoiceClip(input: {
+    uri: string;
+    durationSeconds: number;
+    byteCount: number;
+  }): Promise<string> {
+    const client = clientRef.current;
+    if (!client) throw new Error('Not connected.');
+    const failure = preflightVoiceClip({
+      durationSeconds: input.durationSeconds,
+      byteCount: input.byteCount,
+    });
+    if (failure) throw new Error(failure);
+
+    async function resolveAuth(): Promise<string> {
+      const resp = await client!.sendRequest('voice/resolveAuth', null);
+      if (!resp.ok) {
+        throw new Error(resp.error.message || 'voice/resolveAuth failed.');
+      }
+      const result = resp.result as { token?: unknown } | null;
+      const token = result?.token;
+      if (typeof token !== 'string' || token.trim().length === 0) {
+        throw new Error('voice/resolveAuth did not return a token.');
+      }
+      return token;
+    }
+
+    const audio = { uri: input.uri, name: 'voice.m4a', type: 'audio/m4a' };
+    let token = await resolveAuth();
+    try {
+      return await postTranscribe({ token, audio });
+    } catch (err) {
+      if (err instanceof VoiceAuthExpired) {
+        token = await resolveAuth();
+        return await postTranscribe({ token, audio });
+      }
+      throw err;
+    }
+  }
+
+  function appendToComposer(text: string) {
+    setStatus((prev) =>
+      prev.kind === 'thread-ready'
+        ? {
+            ...prev,
+            composer:
+              prev.composer.trim().length === 0
+                ? text
+                : prev.composer.endsWith(' ')
+                  ? prev.composer + text
+                  : `${prev.composer} ${text}`,
+          }
+        : prev,
+    );
+  }
+
   async function refreshContextUsage(threadId: string) {
     const client = clientRef.current;
     if (!client) return;
@@ -986,6 +1055,8 @@ export default function PairScreen() {
                 onSelectServiceTier={(tier) =>
                   setSelection((sel) => ({ ...sel, serviceTier: tier }))
                 }
+                onTranscribe={transcribeVoiceClip}
+                onTranscribed={appendToComposer}
               />
             </KeyboardAvoidingView>
           )}
@@ -1307,6 +1378,8 @@ function Composer({
   selection,
   contextUsage,
   isSending,
+  onTranscribe,
+  onTranscribed,
   onChange,
   onSend,
   onPickImages,
@@ -1333,9 +1406,12 @@ function Composer({
   onSelectModel: (modelId: string) => void;
   onSelectReasoningEffort: (effort: string) => void;
   onSelectServiceTier: (tier: ServiceTier | null) => void;
+  onTranscribe: (input: { uri: string; durationSeconds: number; byteCount: number }) => Promise<string>;
+  onTranscribed: (text: string) => void;
 }) {
   const [plusOpen, setPlusOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [recorderOpen, setRecorderOpen] = useState(false);
   const insets = useSafeAreaInsets();
   const sendable = isComposerSendable({
     ...INITIAL_COMPOSER_STATE,
@@ -1413,15 +1489,10 @@ function Composer({
           <ContextWindowPill usage={contextUsage} />
 
           <Pressable
-            onPress={() =>
-              Alert.alert(
-                'Voice input',
-                'Voice transcription channel ships in v2 — paste from the keyboard mic for now.',
-              )
-            }
+            onPress={() => setRecorderOpen(true)}
             hitSlop={8}
             style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
-            <Icon name="mic" size={18} color={colors.fg45} />
+            <Icon name="mic" size={18} color={colors.fg70} />
           </Pressable>
 
           <Pressable
@@ -1467,6 +1538,16 @@ function Composer({
         onSelectModel={onSelectModel}
         onSelectReasoningEffort={onSelectReasoningEffort}
         onSelectServiceTier={onSelectServiceTier}
+      />
+
+      <VoiceRecorderModal
+        visible={recorderOpen}
+        onClose={() => setRecorderOpen(false)}
+        onTranscribe={onTranscribe}
+        onTranscribed={(text) => {
+          onTranscribed(text);
+          setRecorderOpen(false);
+        }}
       />
     </View>
   );
@@ -1675,18 +1756,15 @@ function ModelPickerSheet({
   );
 }
 
-// Compact context-window pill. iOS shows a tiny progress ring; on Android we
-// approximate with text + a status dot whose color shifts as the window fills.
-// Tapping the pill opens an expanded panel with raw token counts.
+// Compact context-window pill = a small progress ring, no text. Tap to open
+// the detail modal with raw token counts. Mirrors iOS ContextWindowProgressRing.
 function ContextWindowPill({ usage }: { usage: ContextWindowUsage | null }) {
   const [open, setOpen] = useState(false);
-  const label = compactUsageLabel(usage);
   const fraction = usage ? fractionUsed(usage) : 0;
-  const dotColor =
+  const ringColor =
     fraction > 0.9 ? '#ff8b8b'
     : fraction > 0.7 ? '#ff9f0a'
-    : usage && usage.tokenLimit > 0 ? '#9be39a'
-    : null;
+    : '#9be39a';
 
   return (
     <>
@@ -1694,9 +1772,8 @@ function ContextWindowPill({ usage }: { usage: ContextWindowUsage | null }) {
         onPress={() => setOpen(true)}
         disabled={!usage}
         hitSlop={6}
-        style={({ pressed }) => [styles.ctxPill, pressed && { opacity: 0.7 }]}>
-        {dotColor ? <View style={[styles.ctxPillDot, { backgroundColor: dotColor }]} /> : null}
-        <Text style={styles.ctxPillText}>{label}</Text>
+        style={({ pressed }) => [styles.ctxRingWrap, pressed && { opacity: 0.7 }]}>
+        <ProgressRing size={18} strokeWidth={2.5} fraction={fraction} color={ringColor} />
       </Pressable>
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
         <Pressable style={styles.plusMenuBackdrop} onPress={() => setOpen(false)}>
@@ -1707,7 +1784,8 @@ function ContextWindowPill({ usage }: { usage: ContextWindowUsage | null }) {
               <View style={{ width: 22 }} />
             </View>
             {usage ? (
-              <View style={{ padding: spacing.lg, gap: spacing.sm }}>
+              <View style={{ padding: spacing.lg, gap: spacing.md, alignItems: 'center' }}>
+                <ProgressRing size={72} strokeWidth={6} fraction={fraction} color={ringColor} />
                 <Text style={styles.ctxPanelBig}>
                   {Math.round(fraction * 100)}% used
                 </Text>
@@ -1724,6 +1802,184 @@ function ContextWindowPill({ usage }: { usage: ContextWindowUsage | null }) {
         </Pressable>
       </Modal>
     </>
+  );
+}
+
+// SVG-based progress arc. Renders a faint background circle + a colored arc
+// from 12 o'clock clockwise. fraction in [0..1].
+function ProgressRing({
+  size,
+  strokeWidth,
+  fraction,
+  color,
+}: {
+  size: number;
+  strokeWidth: number;
+  fraction: number;
+  color: string;
+}) {
+  const safe = Math.max(0, Math.min(1, fraction));
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const dashOffset = circumference * (1 - safe);
+  return (
+    <Svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+      <Circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        stroke={colors.fg10}
+        strokeWidth={strokeWidth}
+        fill="none"
+      />
+      <Circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        stroke={color}
+        strokeWidth={strokeWidth}
+        fill="none"
+        strokeDasharray={`${circumference} ${circumference}`}
+        strokeDashoffset={dashOffset}
+        strokeLinecap="round"
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+      />
+    </Svg>
+  );
+}
+
+// Voice recording modal. Wraps expo-audio's useAudioRecorder. Tap mic →
+// permission check → live timer + pulsing dot → tap stop → upload + transcribe
+// → onTranscribed(text). Cancel discards. Mirrors iOS VoiceRecordingCapsule
+// minus the audio-level waveform — Android's recorder doesn't expose levels
+// uniformly enough across devices to reproduce that polish today.
+function VoiceRecorderModal({
+  visible,
+  onClose,
+  onTranscribe,
+  onTranscribed,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  onTranscribe: (input: { uri: string; durationSeconds: number; byteCount: number }) => Promise<string>;
+  onTranscribed: (text: string) => void;
+}) {
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recorderState = useAudioRecorderState(recorder, 250);
+  const [phase, setPhase] = useState<'idle' | 'recording' | 'transcribing' | 'error'>('idle');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const startedAtRef = useRef<number>(0);
+
+  // Auto-start recording the moment the modal becomes visible. On dismiss we
+  // ensure the recorder is stopped so the file handle doesn't linger.
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    (async () => {
+      setErrorMsg(null);
+      try {
+        const perm = await requestRecordingPermissionsAsync();
+        if (!perm.granted) {
+          if (cancelled) return;
+          setErrorMsg('Microphone permission denied.');
+          setPhase('error');
+          return;
+        }
+        await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+        await recorder.prepareToRecordAsync();
+        recorder.record();
+        if (cancelled) return;
+        startedAtRef.current = Date.now();
+        setPhase('recording');
+      } catch (err) {
+        if (cancelled) return;
+        setErrorMsg((err as Error)?.message ?? 'Failed to start recording.');
+        setPhase('error');
+      }
+    })();
+    return () => {
+      cancelled = true;
+      // Stop the recorder if the modal closes mid-record without an explicit stop.
+      if (recorder.isRecording) recorder.stop().catch(() => {});
+    };
+  }, [visible]);
+
+  const elapsedMs = phase === 'recording' && recorderState.durationMillis !== undefined
+    ? recorderState.durationMillis
+    : phase === 'recording'
+      ? Date.now() - startedAtRef.current
+      : 0;
+  const elapsedLabel = formatDuration(elapsedMs);
+
+  async function handleStop() {
+    try {
+      setPhase('transcribing');
+      await recorder.stop();
+      const uri = recorder.uri;
+      if (!uri) throw new Error('Recording produced no file.');
+      const info = await FileSystem.getInfoAsync(uri);
+      const byteCount = info.exists && info.size ? info.size : 0;
+      const durationSeconds = (recorderState.durationMillis ?? Date.now() - startedAtRef.current) / 1000;
+      const text = await onTranscribe({ uri, durationSeconds, byteCount });
+      onTranscribed(text);
+    } catch (err) {
+      setErrorMsg((err as Error)?.message ?? 'Transcription failed.');
+      setPhase('error');
+    }
+  }
+
+  function handleCancel() {
+    if (recorder.isRecording) recorder.stop().catch(() => {});
+    onClose();
+  }
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={handleCancel}>
+      <Pressable style={styles.plusMenuBackdrop} onPress={handleCancel}>
+        <Pressable style={styles.modelSheet} onPress={(e) => e.stopPropagation()}>
+          <View style={styles.modelSheetHeader}>
+            <View style={{ width: 22 }} />
+            <Text style={styles.modelSheetTitle}>
+              {phase === 'transcribing' ? 'Transcribing…' : 'Recording'}
+            </Text>
+            <View style={{ width: 22 }} />
+          </View>
+          <View style={{ padding: spacing.lg, gap: spacing.md, alignItems: 'center' }}>
+            {phase === 'recording' ? (
+              <>
+                <View style={styles.voiceDot} />
+                <Text style={styles.voiceTimer}>{elapsedLabel || '0s'}</Text>
+                <Text style={styles.voiceHint}>
+                  Up to {VOICE_LIMITS.maxDurationSeconds}s — tap Stop to transcribe.
+                </Text>
+                <View style={{ flexDirection: 'row', gap: spacing.md }}>
+                  <Pressable onPress={handleCancel} style={styles.voiceSecondaryBtn}>
+                    <Text style={styles.voiceSecondaryBtnText}>Cancel</Text>
+                  </Pressable>
+                  <Pressable onPress={handleStop} style={styles.voicePrimaryBtn}>
+                    <Text style={styles.voicePrimaryBtnText}>Stop</Text>
+                  </Pressable>
+                </View>
+              </>
+            ) : phase === 'transcribing' ? (
+              <>
+                <ActivityIndicator color={colors.plan} />
+                <Text style={styles.voiceHint}>Sending audio to ChatGPT…</Text>
+              </>
+            ) : phase === 'error' ? (
+              <>
+                <Text style={[styles.voiceHint, { color: '#ff8b8b' }]}>{errorMsg}</Text>
+                <Pressable onPress={onClose} style={styles.voicePrimaryBtn}>
+                  <Text style={styles.voicePrimaryBtnText}>Close</Text>
+                </Pressable>
+              </>
+            ) : (
+              <ActivityIndicator color={colors.plan} />
+            )}
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
   );
 }
 
@@ -2507,25 +2763,11 @@ const styles = StyleSheet.create({
     color: colors.plan,
     fontSize: fontSize.subheadline,
   },
-  ctxPill: {
-    flexDirection: 'row',
+  ctxRingWrap: {
+    width: 28,
+    height: 28,
     alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: colors.fg10,
-    minWidth: 22,
-  },
-  ctxPillDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  ctxPillText: {
-    color: colors.fg70,
-    fontSize: fontSize.caption,
-    fontFamily: 'Menlo',
+    justifyContent: 'center',
   },
   ctxPanelBig: {
     color: colors.fg,
@@ -2640,6 +2882,44 @@ const styles = StyleSheet.create({
     fontSize: fontSize.body,
     paddingHorizontal: spacing.lg,
     paddingVertical: 12,
+  },
+  voiceDot: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#ff5b5b',
+  },
+  voiceTimer: {
+    color: colors.fg,
+    fontSize: fontSize.title3,
+    fontWeight: weight.semibold,
+    fontFamily: 'Menlo',
+  },
+  voiceHint: {
+    color: colors.fg45,
+    fontSize: fontSize.subheadline,
+    textAlign: 'center',
+  },
+  voicePrimaryBtn: {
+    backgroundColor: colors.fg,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: 10,
+    borderRadius: radius.capsule,
+  },
+  voicePrimaryBtnText: {
+    color: colors.bg,
+    fontSize: fontSize.body,
+    fontWeight: weight.semibold,
+  },
+  voiceSecondaryBtn: {
+    backgroundColor: colors.fg10,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: 10,
+    borderRadius: radius.capsule,
+  },
+  voiceSecondaryBtnText: {
+    color: colors.fg,
+    fontSize: fontSize.body,
   },
   approvalCard: {
     backgroundColor: colors.fg6,
