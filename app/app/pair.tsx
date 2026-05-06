@@ -83,6 +83,12 @@ import {
   reasoningTitle,
   selectedModelOption,
 } from '@/lib/protocol/runtime';
+import {
+  ContextWindowUsage,
+  compactUsageLabel,
+  extractContextWindowUsage,
+  fractionUsed,
+} from '@/lib/protocol/contextWindow';
 
 // How many threads each project section shows by default in the sidebar drawer.
 // Tap "Show all (N)" on a section to reveal the rest. Mirrors the leaner
@@ -125,6 +131,7 @@ type Status =
       attachments: ComposerAttachment[];
       planArmed: boolean;
       selection: RuntimeSelection;
+      contextUsage: ContextWindowUsage | null;
       activeTurnId: string | null;
       streamingText: string;
       isSending: boolean;
@@ -482,10 +489,14 @@ export default function PairScreen() {
         attachments: INITIAL_COMPOSER_STATE.attachments,
         planArmed: INITIAL_COMPOSER_STATE.planArmed,
         selection: { modelId: null, reasoningEffort: null, serviceTier: null },
+        contextUsage: null,
         activeTurnId: null,
         streamingText: '',
         isSending: false,
       });
+      // Fire-and-forget context-window fetch. The pill stays "—" until this
+      // resolves; older bridges without thread/contextWindow/read keep "—".
+      void refreshContextUsage(thread.id);
     } else {
       setStatus({
         kind: 'thread-error',
@@ -660,6 +671,10 @@ export default function PairScreen() {
 
     const resp = await client.sendRequest('turn/start', startParams);
 
+    if (resp.ok) {
+      void refreshContextUsage(cur.thread.id);
+    }
+
     if (!resp.ok) {
       setStatus((prev) => {
         if (prev.kind !== 'thread-ready') return prev;
@@ -690,6 +705,23 @@ export default function PairScreen() {
     setStatus((prev) =>
       prev.kind === 'thread-ready' ? { ...prev, selection: update(prev.selection) } : prev,
     );
+  }
+
+  async function refreshContextUsage(threadId: string) {
+    const client = clientRef.current;
+    if (!client) return;
+    try {
+      const resp = await client.sendRequest('thread/contextWindow/read', { threadId });
+      if (!resp.ok) return;
+      const usage = extractContextWindowUsage(resp.result);
+      setStatus((prev) =>
+        prev.kind === 'thread-ready' && prev.thread.id === threadId
+          ? { ...prev, contextUsage: usage }
+          : prev,
+      );
+    } catch {
+      // Older bridges may not expose this method — pill stays "—".
+    }
   }
 
   function removeAttachment(id: string) {
@@ -893,6 +925,7 @@ export default function PairScreen() {
                 planArmed={status.planArmed}
                 models={availableModels}
                 selection={status.selection}
+                contextUsage={status.contextUsage}
                 isSending={status.isSending}
                 onChange={setComposer}
                 onSend={sendPrompt}
@@ -1221,6 +1254,7 @@ function Composer({
   planArmed,
   models,
   selection,
+  contextUsage,
   isSending,
   onChange,
   onSend,
@@ -1237,6 +1271,7 @@ function Composer({
   planArmed: boolean;
   models: ModelOption[];
   selection: RuntimeSelection;
+  contextUsage: ContextWindowUsage | null;
   isSending: boolean;
   onChange: (s: string) => void;
   onSend: () => void;
@@ -1324,9 +1359,7 @@ function Composer({
 
           <View style={{ flex: 1 }} />
 
-          <View style={styles.ctxPill}>
-            <Text style={styles.ctxPillText}>—</Text>
-          </View>
+          <ContextWindowPill usage={contextUsage} />
 
           <Pressable
             onPress={() =>
@@ -1588,6 +1621,58 @@ function ModelPickerSheet({
         </Pressable>
       </Pressable>
     </Modal>
+  );
+}
+
+// Compact context-window pill. iOS shows a tiny progress ring; on Android we
+// approximate with text + a status dot whose color shifts as the window fills.
+// Tapping the pill opens an expanded panel with raw token counts.
+function ContextWindowPill({ usage }: { usage: ContextWindowUsage | null }) {
+  const [open, setOpen] = useState(false);
+  const label = compactUsageLabel(usage);
+  const fraction = usage ? fractionUsed(usage) : 0;
+  const dotColor =
+    fraction > 0.9 ? '#ff8b8b'
+    : fraction > 0.7 ? '#ff9f0a'
+    : usage && usage.tokenLimit > 0 ? '#9be39a'
+    : null;
+
+  return (
+    <>
+      <Pressable
+        onPress={() => setOpen(true)}
+        disabled={!usage}
+        hitSlop={6}
+        style={({ pressed }) => [styles.ctxPill, pressed && { opacity: 0.7 }]}>
+        {dotColor ? <View style={[styles.ctxPillDot, { backgroundColor: dotColor }]} /> : null}
+        <Text style={styles.ctxPillText}>{label}</Text>
+      </Pressable>
+      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+        <Pressable style={styles.plusMenuBackdrop} onPress={() => setOpen(false)}>
+          <Pressable style={styles.modelSheet} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.modelSheetHeader}>
+              <View style={{ width: 22 }} />
+              <Text style={styles.modelSheetTitle}>Context window</Text>
+              <View style={{ width: 22 }} />
+            </View>
+            {usage ? (
+              <View style={{ padding: spacing.lg, gap: spacing.sm }}>
+                <Text style={styles.ctxPanelBig}>
+                  {Math.round(fraction * 100)}% used
+                </Text>
+                <Text style={styles.ctxPanelDetail}>
+                  {usage.tokensUsed.toLocaleString()} / {usage.tokenLimit.toLocaleString()} tokens
+                </Text>
+              </View>
+            ) : (
+              <Text style={styles.modelSheetEmpty}>
+                The bridge hasn’t reported context usage for this thread yet.
+              </Text>
+            )}
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </>
   );
 }
 
@@ -2372,16 +2457,33 @@ const styles = StyleSheet.create({
     fontSize: fontSize.subheadline,
   },
   ctxPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
     paddingHorizontal: 8,
-    paddingVertical: 3,
+    paddingVertical: 4,
     borderRadius: 999,
     backgroundColor: colors.fg10,
     minWidth: 22,
-    alignItems: 'center',
+  },
+  ctxPillDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
   },
   ctxPillText: {
-    color: colors.fg45,
+    color: colors.fg70,
     fontSize: fontSize.caption,
+    fontFamily: 'Menlo',
+  },
+  ctxPanelBig: {
+    color: colors.fg,
+    fontSize: fontSize.title3,
+    fontWeight: weight.semibold,
+  },
+  ctxPanelDetail: {
+    color: colors.fg70,
+    fontSize: fontSize.body,
     fontFamily: 'Menlo',
   },
   sendBtn: {
