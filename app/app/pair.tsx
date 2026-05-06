@@ -57,7 +57,7 @@ import { colors, fontSize, radius, spacing, weight } from '@/lib/theme/tokens';
 
 // Thread/turn types and parsers live in lib/protocol/extract.ts so they can be
 // fixture-tested. Keep the imports here narrow.
-import { extractThreads, extractTurns, ThreadRow, TurnRow } from '@/lib/protocol/extract';
+import { extractThreads, extractTurnMeta, extractTurns, ThreadRow, TurnMeta, TurnRow } from '@/lib/protocol/extract';
 import { IntermediateBlock, TurnDisplay, buildTurnDisplays } from '@/lib/turn-display';
 
 type Status =
@@ -90,6 +90,7 @@ type Status =
       threads: ThreadRow[];
       thread: ThreadRow;
       turns: TurnRow[];
+      turnMeta: TurnMeta[];
       rawTurns: unknown;
       composer: string;
       activeTurnId: string | null;
@@ -421,6 +422,7 @@ export default function PairScreen() {
         threads: cur.threads,
         thread,
         turns: extractTurns(resp.result),
+        turnMeta: extractTurnMeta(resp.result),
         rawTurns: resp.result,
         composer: '',
         activeTurnId: null,
@@ -705,7 +707,7 @@ export default function PairScreen() {
               behavior={Platform.OS === 'ios' ? 'padding' : undefined}
               keyboardVerticalOffset={0}>
               <FlatList
-                data={buildTurnDisplays(status.turns)}
+                data={buildTurnDisplays(status.turns, status.turnMeta)}
                 keyExtractor={(t, i) => t.id || `turn-${i}`}
                 ListEmptyComponent={
                   <View style={styles.empty}>

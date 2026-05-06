@@ -12,15 +12,20 @@
 // Driven entirely off the `turnIndex`, `phase`, and `toolKind` fields that
 // extract.ts now sets on each row. Pure function; tested with fixtures.
 
-import type { TurnRow } from './protocol/extract';
+import type { TurnMeta, TurnRow } from './protocol/extract';
 
 export type TurnDisplay = {
   id: string;
   userPrompts: TurnRow[];
   intermediate: IntermediateBlock[];
   finalAnswer: TurnRow | null;
-  // Sum of all tool durations inside the turn — used to render the "Worked for X" label.
+  // Wall-clock duration of the entire turn (start → completion) when the
+  // bridge supplied turn metadata. Falls back to `toolDurationMs` (the sum of
+  // tool execution times) when wall-clock isn't available — that's a lower
+  // bound but at least non-zero for in-flight or legacy responses.
   totalDurationMs: number;
+  toolDurationMs: number;
+  status?: string;
 };
 
 export type IntermediateBlock =
@@ -30,7 +35,13 @@ export type IntermediateBlock =
   | { kind: 'tool-call'; row: TurnRow }
   | { kind: 'system'; row: TurnRow };
 
-export function buildTurnDisplays(rows: TurnRow[]): TurnDisplay[] {
+export function buildTurnDisplays(rows: TurnRow[], meta: TurnMeta[] = []): TurnDisplay[] {
+  const metaByIndex = new Map<number, TurnMeta>();
+  for (const m of meta) metaByIndex.set(m.turnIndex, m);
+  return buildTurnDisplaysImpl(rows, metaByIndex);
+}
+
+function buildTurnDisplaysImpl(rows: TurnRow[], metaByIndex: Map<number, TurnMeta>): TurnDisplay[] {
   // Bucket by turnIndex. Rows without a turnIndex (e.g., live-streamed
   // optimistic rows from compose) get bucketed into a synthetic last turn.
   const byTurn = new Map<number, TurnRow[]>();
@@ -57,12 +68,12 @@ export function buildTurnDisplays(rows: TurnRow[]): TurnDisplay[] {
   const out: TurnDisplay[] = [];
   for (let i = 0; i <= maxIndex; i++) {
     const bucket = byTurn.get(i);
-    if (bucket && bucket.length > 0) out.push(buildOne(bucket, i));
+    if (bucket && bucket.length > 0) out.push(buildOne(bucket, i, metaByIndex.get(i)));
   }
   return out;
 }
 
-function buildOne(rows: TurnRow[], turnIdx: number): TurnDisplay {
+function buildOne(rows: TurnRow[], turnIdx: number, meta?: TurnMeta): TurnDisplay {
   const userPrompts: TurnRow[] = [];
   let finalAnswer: TurnRow | null = null;
 
@@ -103,7 +114,7 @@ function buildOne(rows: TurnRow[], turnIdx: number): TurnDisplay {
     cmdDuration = 0;
   };
 
-  let totalDurationMs = 0;
+  let toolDurationMs = 0;
 
   for (const r of rows) {
     if (r === primaryUser) continue;
@@ -113,7 +124,7 @@ function buildOne(rows: TurnRow[], turnIdx: number): TurnDisplay {
       cmdBuffer.push(r);
       if (typeof r.durationMs === 'number') {
         cmdDuration += r.durationMs;
-        totalDurationMs += r.durationMs;
+        toolDurationMs += r.durationMs;
       }
       continue;
     }
@@ -121,13 +132,13 @@ function buildOne(rows: TurnRow[], turnIdx: number): TurnDisplay {
 
     if (r.role === 'tool' && r.toolKind === 'mcp') {
       intermediate.push({ kind: 'tool-call', row: r });
-      if (typeof r.durationMs === 'number') totalDurationMs += r.durationMs;
+      if (typeof r.durationMs === 'number') toolDurationMs += r.durationMs;
       continue;
     }
     if (r.role === 'tool') {
       // Other tool kinds (file, generic) — render as a single tool-call too.
       intermediate.push({ kind: 'tool-call', row: r });
-      if (typeof r.durationMs === 'number') totalDurationMs += r.durationMs;
+      if (typeof r.durationMs === 'number') toolDurationMs += r.durationMs;
       continue;
     }
     if (r.role === 'user') {
@@ -146,12 +157,19 @@ function buildOne(rows: TurnRow[], turnIdx: number): TurnDisplay {
   }
   flushCommands();
 
+  // Prefer wall-clock duration from bridge meta; fall back to tool sum.
+  const totalDurationMs = typeof meta?.durationMs === 'number' && meta.durationMs > 0
+    ? meta.durationMs
+    : toolDurationMs;
+
   return {
-    id: rows[0]?.id ?? `turn-${turnIdx}`,
+    id: meta?.id ?? rows[0]?.id ?? `turn-${turnIdx}`,
     userPrompts,
     intermediate,
     finalAnswer,
     totalDurationMs,
+    toolDurationMs,
+    status: meta?.status,
   };
 }
 

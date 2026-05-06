@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { extractTurns } from './protocol/extract';
+import { extractTurnMeta, extractTurns } from './protocol/extract';
 import type { TurnRow } from './protocol/extract';
 import { buildTurnDisplays } from './turn-display';
 
@@ -56,6 +56,17 @@ describe('buildTurnDisplays (against captured 019dfc7c session)', () => {
     const longTurn = turns.find((t) => t.totalDurationMs > 0);
     expect(longTurn).toBeDefined();
     expect(longTurn!.totalDurationMs).toBeGreaterThan(0);
+  });
+
+  it('uses bridge-supplied wall-clock duration over the tool-time sum', () => {
+    const meta = extractTurnMeta(response.result);
+    const withMeta = buildTurnDisplays(rows, meta);
+    const longTurn = withMeta.find((t) => t.intermediate.length > 5);
+    expect(longTurn).toBeDefined();
+    // Wall-clock should be substantially larger than tool sum because Codex
+    // spends most of its time thinking, not running tools (~43s tool, 2m+ wall).
+    expect(longTurn!.totalDurationMs).toBeGreaterThan(longTurn!.toolDurationMs);
+    expect(longTurn!.totalDurationMs).toBeGreaterThan(60_000); // > 1 min for a real turn
   });
 
   it('preserves chronological order across blocks', () => {

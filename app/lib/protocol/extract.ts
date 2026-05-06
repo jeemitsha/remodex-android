@@ -73,6 +73,40 @@ export type TurnRow = {
 
 // ---------- threads ----------
 
+// Per-turn metadata extracted alongside the flat row list. Used by
+// lib/turn-display.ts to render the iOS-style "Worked for X" wall-clock
+// duration (sum of tool durations is much shorter than reality — e.g. a 2m 39s
+// turn has only ~43s of actual tool execution; the rest is thinking).
+export type TurnMeta = {
+  id: string;
+  turnIndex: number;
+  startedAt?: number; // ms epoch
+  completedAt?: number; // ms epoch
+  durationMs?: number; // wall-clock from the bridge
+  status?: string;
+  error?: string;
+};
+
+export function extractTurnMeta(result: unknown): TurnMeta[] {
+  const list = pickArray(result, ['data', 'items', 'turns']);
+  const ordered = list.slice().reverse();
+  const out: TurnMeta[] = [];
+  for (let i = 0; i < ordered.length; i++) {
+    const t = ordered[i];
+    if (!isRecord(t)) continue;
+    out.push({
+      id: pickString(t.id, t.turnId) || `turn-${i}`,
+      turnIndex: i,
+      startedAt: normalizeTimestamp(t.startedAt),
+      completedAt: normalizeTimestamp(t.completedAt),
+      durationMs: typeof t.durationMs === 'number' ? t.durationMs : undefined,
+      status: pickString(isRecord(t.status) ? t.status.type : t.status),
+      error: typeof t.error === 'string' ? t.error : undefined,
+    });
+  }
+  return out;
+}
+
 export function extractThreads(result: unknown): ThreadRow[] {
   const list = pickArray(result, ['data', 'items', 'threads']);
   return list.map(toThreadRow).filter((t): t is ThreadRow => !!t);
