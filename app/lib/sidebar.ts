@@ -1,5 +1,6 @@
 // Sidebar grouping + relative-time formatting that mirrors the iOS sidebar.
-// Reference: SidebarThreadGrouping.swift, SidebarRelativeTimeFormatter.swift.
+// Reference: SidebarThreadGrouping.swift, SidebarRelativeTimeFormatter.swift,
+// CodexThread.normalizeProjectPath, CodexThread.isLikelyFilesystemPath.
 
 export type ThreadLike = {
   id: string;
@@ -8,6 +9,31 @@ export type ThreadLike = {
   cwd?: string;
   updatedAt?: number | string;
 };
+
+// Mirrors iOS CodexThread.isLikelyFilesystemPath. The bridge sometimes sets
+// `cwd` to non-path values (e.g. "Cloud" for app-server / agent threads), so
+// we only treat the cwd as a project anchor when it actually looks like a
+// filesystem path. Everything else falls into the "Chats" bucket.
+export function isLikelyFilesystemPath(value: string): boolean {
+  if (!value) return false;
+  if (value === '/' || value.startsWith('/') || value.startsWith('~/')) return true;
+  // Windows drive letter: "C:\..." or "C:/..."
+  if (
+    value.length >= 3
+    && /^[A-Za-z]:[\\/]/.test(value)
+  ) return true;
+  // UNC path: "\\server\share"
+  if (value.startsWith('\\\\')) return true;
+  return false;
+}
+
+export function normalizeProjectPath(cwd: string | undefined): string | null {
+  if (!cwd) return null;
+  const trimmed = cwd.trim().replace(/\/+$/, '');
+  if (!trimmed) return null;
+  if (!isLikelyFilesystemPath(trimmed)) return null;
+  return trimmed;
+}
 
 export type ThreadGroup<T> = {
   key: string;
@@ -51,14 +77,19 @@ export function applyGroupLimit<T extends { id: string }>(
   });
 }
 
-// Groups by the cwd path (one section per project), like iOS does.
-// Threads without a cwd land in an "Other" group.
+// Groups by the cwd path (one section per project), like iOS does. Threads
+// whose cwd doesn't look like a filesystem path (e.g. cloud / agent-managed
+// chats with "Cloud" or empty cwd) land in a no-project bucket — they get
+// rendered as the bottom "Chats" section, not as their own project.
+const NO_PROJECT_KEY = '__no_cwd__';
+
 export function groupThreadsByProject<T extends ThreadLike>(threads: T[]): ThreadGroup<T>[] {
   const buckets = new Map<string, ThreadGroup<T>>();
 
   for (const t of threads) {
-    const path = (t.cwd && t.cwd.trim()) || '__no_cwd__';
-    const isReal = path !== '__no_cwd__';
+    const normalized = normalizeProjectPath(t.cwd);
+    const path = normalized ?? NO_PROJECT_KEY;
+    const isReal = normalized !== null;
     if (!buckets.has(path)) {
       buckets.set(path, {
         key: path,
@@ -98,17 +129,16 @@ export function relativeTime(updatedAt: number | string | undefined, now: number
   return `${Math.round(months / 12)}y`;
 }
 
-// True for statuses the bridge marks as archived. iOS filters these out of
-// the sidebar entirely; we mirror that — archived chats are reachable via the
-// bridge's archive view, not the live sidebar.
-export function isArchivedStatus(status: string | undefined): boolean {
-  if (!status) return false;
-  const s = status.toLowerCase();
-  return s === 'archived' || s === 'archived_local';
-}
-
-export function filterActiveThreads<T extends { status?: string }>(threads: T[]): T[] {
-  return threads.filter((t) => !isArchivedStatus(t.status));
+// Drops threads whose id appears in `archivedIds`. The bridge's `thread/list`
+// (active call, no `archived` param) still includes archived threads — iOS
+// makes a parallel `thread/list { archived: true }` call, builds the id set,
+// and uses it to filter / mark threads. We mirror that.
+export function filterActiveThreads<T extends { id: string }>(
+  threads: T[],
+  archivedIds: ReadonlySet<string>,
+): T[] {
+  if (archivedIds.size === 0) return threads;
+  return threads.filter((t) => !archivedIds.has(t.id));
 }
 
 // Splits threads into project-bound groups (with cwd) and project-less chats.

@@ -61,7 +61,6 @@ import {
 import { resolveTrustedSession } from '@/lib/protocol/trustedSessionResolve';
 import {
   applyGroupLimit,
-  filterActiveThreads,
   relativeTime,
   splitProjectsAndChats,
   statusColor,
@@ -440,8 +439,14 @@ export default function PairScreen() {
         }
       })();
 
-      // 2) thread/list — paginated; for MVP just grab the first page.
-      const listResp = await client.sendRequest('thread/list', { limit: 50 });
+      // 2) thread/list — active call (no `archived` param) + parallel
+      // archived call. iOS does this exact pair-and-cross-reference because
+      // the active list still contains archived threads; we need the
+      // archived id set to drop them client-side.
+      const [listResp, archivedResp] = await Promise.all([
+        client.sendRequest('thread/list', { limit: 50 }),
+        client.sendRequest('thread/list', { limit: 100, archived: true }),
+      ]);
       if (!listResp.ok) {
         if (!cancelled) {
           setStatus({
@@ -454,7 +459,11 @@ export default function PairScreen() {
         return;
       }
 
-      const threads = extractThreads(listResp.result);
+      const allThreads = extractThreads(listResp.result);
+      const archivedIds = archivedResp.ok
+        ? new Set(extractThreads(archivedResp.result).map((t) => t.id))
+        : new Set<string>();
+      const threads = allThreads.filter((t) => !archivedIds.has(t.id));
       if (!cancelled) {
         setStatus({
           kind: 'sessions-ready',
@@ -1167,11 +1176,10 @@ type SidebarSection = {
   data: ThreadRow[];
 };
 
-// Builds the SectionList sections from the raw threads list:
-//   1. drops archived threads
-//   2. groups the rest by cwd → project sections
-//   3. moves cwd-less threads into a "Chats" section pinned at the bottom
-//   4. caps each section at SIDEBAR_THREADS_PER_GROUP (with the active thread
+// Builds the SectionList sections from the (already archive-filtered) threads:
+//   1. groups by cwd → project sections (only when cwd is a real filesystem path)
+//   2. moves non-path / cwd-less threads into a "Chats" section pinned at the bottom
+//   3. caps each section at SIDEBAR_THREADS_PER_GROUP (with the active thread
 //      pinned so it never disappears behind "Show all")
 function buildSidebarSections(
   threads: ThreadRow[],
@@ -1179,8 +1187,7 @@ function buildSidebarSections(
   expandedKeys: ReadonlySet<string>,
   activeThreadId: string | null,
 ): SidebarSection[] {
-  const active = filterActiveThreads(threads);
-  const { projects, chats } = splitProjectsAndChats(active);
+  const { projects, chats } = splitProjectsAndChats(threads);
   const pinned = activeThreadId ? new Set([activeThreadId]) : undefined;
 
   const projectSections: SidebarSection[] = applyGroupLimit(

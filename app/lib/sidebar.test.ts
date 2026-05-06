@@ -4,23 +4,25 @@ import {
   applyGroupLimit,
   filterActiveThreads,
   groupThreadsByProject,
-  isArchivedStatus,
+  isLikelyFilesystemPath,
+  normalizeProjectPath,
   relativeTime,
   splitProjectsAndChats,
   statusColor,
 } from './sidebar';
 
 describe('groupThreadsByProject', () => {
-  it('groups threads by their cwd path with basename labels', () => {
+  it('groups threads by their normalized cwd path with basename labels', () => {
     const out = groupThreadsByProject([
       { id: 't1', cwd: '/Users/dev/auth-middleware', updatedAt: 100 },
-      { id: 't2', cwd: '/Users/dev/auth-middleware/', updatedAt: 200 },
+      { id: 't2', cwd: '/Users/dev/auth-middleware/', updatedAt: 200 }, // trailing slash → same bucket
       { id: 't3', cwd: '/Users/dev/payments', updatedAt: 50 },
     ]);
 
-    expect(out).toHaveLength(3);
-    // Same cwd modulo trailing slash → still distinct buckets, since iOS treats them as separate
-    expect(out.map((g) => g.label).sort()).toEqual(['auth-middleware', 'auth-middleware', 'payments']);
+    expect(out).toHaveLength(2);
+    expect(out.map((g) => g.label).sort()).toEqual(['auth-middleware', 'payments']);
+    const auth = out.find((g) => g.label === 'auth-middleware')!;
+    expect(auth.threads.map((t) => t.id)).toEqual(['t2', 't1']);
   });
 
   it('puts threads without cwd in an "Other" bucket', () => {
@@ -150,22 +152,63 @@ describe('applyGroupLimit', () => {
   });
 });
 
-describe('isArchivedStatus / filterActiveThreads', () => {
-  it('matches both archived and archived_local (case-insensitive)', () => {
-    expect(isArchivedStatus('archived')).toBe(true);
-    expect(isArchivedStatus('Archived_Local')).toBe(true);
-    expect(isArchivedStatus('completed')).toBe(false);
-    expect(isArchivedStatus(undefined)).toBe(false);
+describe('filterActiveThreads (drops by id-set)', () => {
+  it('drops threads whose id is in the archived set', () => {
+    const out = filterActiveThreads(
+      [
+        { id: 'live-1' },
+        { id: 'old' },
+        { id: 'live-2' },
+        { id: 'archived-local' },
+      ],
+      new Set(['old', 'archived-local']),
+    );
+    expect(out.map((t) => t.id)).toEqual(['live-1', 'live-2']);
   });
 
-  it('drops archived threads from the active list', () => {
-    const out = filterActiveThreads([
-      { id: 'live', status: 'running' },
-      { id: 'old', status: 'archived' },
-      { id: 'idle' }, // no status → kept
-      { id: 'archived-local', status: 'archived_local' },
+  it('returns the input unchanged when the archived set is empty', () => {
+    const input = [{ id: 'a' }, { id: 'b' }];
+    expect(filterActiveThreads(input, new Set())).toBe(input);
+  });
+});
+
+describe('normalizeProjectPath / isLikelyFilesystemPath', () => {
+  it('returns null for empty / whitespace cwd', () => {
+    expect(normalizeProjectPath(undefined)).toBeNull();
+    expect(normalizeProjectPath('')).toBeNull();
+    expect(normalizeProjectPath('   ')).toBeNull();
+  });
+
+  it('returns null for non-path values like "Cloud"', () => {
+    expect(normalizeProjectPath('Cloud')).toBeNull();
+    expect(normalizeProjectPath('agent-runtime')).toBeNull();
+    expect(isLikelyFilesystemPath('Cloud')).toBe(false);
+  });
+
+  it('keeps unix paths and tilde-relative paths', () => {
+    expect(normalizeProjectPath('/Users/me/proj')).toBe('/Users/me/proj');
+    expect(normalizeProjectPath('/Users/me/proj/')).toBe('/Users/me/proj');
+    expect(normalizeProjectPath('~/Code/foo')).toBe('~/Code/foo');
+  });
+
+  it('keeps Windows drive-letter paths', () => {
+    expect(normalizeProjectPath('C:/Code/proj')).toBe('C:/Code/proj');
+    expect(normalizeProjectPath('D:\\Code')).toBe('D:\\Code');
+  });
+});
+
+describe('groupThreadsByProject (with normalization)', () => {
+  it('moves threads with non-path cwd values into the no-project bucket', () => {
+    const out = groupThreadsByProject([
+      { id: 'p1', cwd: '/Users/dev/auth', updatedAt: 1 },
+      { id: 'cloud1', cwd: 'Cloud', updatedAt: 2 },
+      { id: 'cloud2', cwd: '', updatedAt: 3 },
+      { id: 'p2', cwd: '/Users/dev/auth', updatedAt: 4 },
     ]);
-    expect(out.map((t) => t.id)).toEqual(['live', 'idle']);
+    const auth = out.find((g) => g.label === 'auth');
+    const other = out.find((g) => g.label === 'Other');
+    expect(auth?.threads.map((t) => t.id)).toEqual(['p2', 'p1']);
+    expect(other?.threads.map((t) => t.id)).toEqual(['cloud2', 'cloud1']);
   });
 });
 
