@@ -1,0 +1,32 @@
+# Dependencies (each subproject manages its own)
+**/node_modules/
+
+# Expo / Metro
+**/.expo/
+**/dist/
+**/web-build/
+**/expo-env.d.ts
+**/.metro-health-check*
+
+# Native build artifacts
+**/.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# Local secrets / env (don't commit pairing JSON or device keys)
+.env
+.env.local
+*.pem
