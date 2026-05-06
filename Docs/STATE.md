@@ -17,6 +17,39 @@ Build a **production-quality, polished, third-party Android client** for the Rem
 
 ## Where we left off (most recent → oldest)
 
+### 2026-05-06 — late evening — proper "Worked for" turn wrapper, wall-clock duration, precise format
+
+**Commits in this checkpoint** (newest first):
+- `<latest>` precise `Xh Xm Xs` duration formatter — moved to `lib/format.ts`, 6 fixture-backed tests
+- `d58b415` wall-clock turn duration via new `extractTurnMeta` (was summing tool durations only — under-reported; the bridge sends top-level `durationMs`)
+- `5a36a21` "Worked for X" turn wrapper with sub-grouped tools (commands batch + MCP pills + steered prompts + intermediate narration)
+- `f9b5b24` no agent bubbles, uniform user bubble, no top bar, tighter bullet indentation
+- `2f063e2` first attempt at tool grouping + welcome+drawer + markdown
+
+**State of UI now**:
+- Default landing after auto-reconnect = welcome screen (green ✓ "Paired" + "Open sessions" CTA + ☰ button). NO sidebar visible.
+- Sidebar slides in from left as overlay drawer (Animated translateX, 220ms). Tap backdrop or thread → close.
+- Per-turn chat layout: `[user bubble right] → [Worked for {wall-clock} ▸] → [final answer plain markdown left]`.
+- Inside expanded "Worked for": narration text (markdown), `▸ Ran N commands` collapsible (each command further expandable to show $cmd + output), `▸ Used Gmail` MCP pills, "Steered conversation" sub-prompts.
+- Bullet list indentation 4× tighter than default react-native-markdown-display.
+- Wall-clock duration is precise (`2m 49s` not `3m`).
+
+**Open known issues**:
+- The composer's send button still shows a `qrcode` SF Symbol icon by mistake (should be a paper plane / arrow).
+- The capture script still requires a fresh QR + manual paste of `pairing.json` each run (no persistent identity yet).
+- `assistant`-role text inside the assistant block uses our default-fontSize body. Headings render but the visual hierarchy in the captured fixture (which has `### Latest Status` etc.) could be tightened more.
+- Tool calls happening RIGHT NOW (live streaming) don't yet appear inside a "Worked for" wrapper because we only build the wrapper from completed turn metadata. Fine for MVP.
+
+**Test infra status**: 7 test files, 69 unit + fixture-backed tests, all green in ~300ms. Capture script + fixture corpus working — re-capture with `REMODEX_CAPTURE_THREAD_IDS=<id>,...` to refresh.
+
+**Next chunks** (in order, commit each):
+1. **Composer send-icon fix** — replace the `qrcode` icon with a proper send icon (`Icon` mapping → `send` or `arrow.up.circle`).
+2. **Persistent identity for `npm run capture`** — save phone identity to `app/lib/__fixtures__/.identity.cache.json` (gitignored), use `trustedSessionResolve` on subsequent runs, no QR needed.
+3. **Component snapshot tests** — set up `@testing-library/react-native`, snapshot `MessageBubble` / `WorkedForCard` / `CommandsBatch` / `ApprovalCard` against the captured turn-display structure.
+4. **Streaming tool-call grouping** — when the user sends a prompt, accumulate intermediate `agentMessage`/`commandExecution` notifications into a live `Worked for` wrapper that updates as events stream in. Currently the live stream only shows raw `streamingText` for the final assistant text.
+5. **EAS dev build** — installable APK; drops Expo Go dependency; opens the door for `react-native-quick-crypto` if perf ever matters.
+6. **Polish** — proper send-icon (paper plane), highlight active thread inside drawer (already done, verify), pull-to-refresh on sessions list, better empty states.
+
 ### 2026-05-06 — evening — tool grouping + welcome+drawer + markdown (commit `2f063e2`)
 
 **User feedback addressed**:
@@ -216,3 +249,4 @@ The capture script uses an ephemeral phone identity each run, so it doesn't poll
 - **2026-05-06 mid afternoon**: pivoted to test infrastructure (vitest + capture harness + fixture-backed parsers in `extract.ts`). 51 unit tests pass. Old inline parsers in `pair.tsx` not yet swapped — that's the next step.
 - **2026-05-06 late afternoon**: swapped `pair.tsx` parsers to use `extract.ts`; rebuilt thread-detail UI as chat bubbles + command-execution cards; sidebar now shows preview + branch pill. Commit `cac2c4d`. Awaiting user phone validation.
 - **2026-05-06 evening**: chronological turn order fix; collapsible tool groups (lib/group-turns.ts); welcome+drawer layout pattern; react-native-markdown-display for assistant text; mcpToolCall extraction. Commit `2f063e2`. 57/57 tests.
+- **2026-05-06 late evening**: proper "Worked for X" turn wrapper (`lib/turn-display.ts`); per-turn structure with narration / commands-batch / mcp-pill / steered blocks; no-bubble assistant; uniform user bubble; tight bullet indent; removed top-only-back-arrow bar; wall-clock turn duration via `extractTurnMeta`; precise `Xh Xm Xs` formatter in `lib/format.ts`. 69/69 tests. Awaiting user phone validation.

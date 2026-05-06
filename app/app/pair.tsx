@@ -58,6 +58,7 @@ import { colors, fontSize, radius, spacing, weight } from '@/lib/theme/tokens';
 // Thread/turn types and parsers live in lib/protocol/extract.ts so they can be
 // fixture-tested. Keep the imports here narrow.
 import { extractThreads, extractTurnMeta, extractTurns, ThreadRow, TurnMeta, TurnRow } from '@/lib/protocol/extract';
+import { formatDuration } from '@/lib/format';
 import { IntermediateBlock, TurnDisplay, buildTurnDisplays } from '@/lib/turn-display';
 
 type Status =
@@ -1300,12 +1301,8 @@ function CommandOutput({ text }: { text: string }) {
   );
 }
 
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  const s = ms / 1000;
-  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)}s`;
-  return `${Math.round(s / 60)}m`;
-}
+// formatDuration moved to lib/format.ts (fixture-tested) so the production
+// function is the same one tests exercise.
 
 // Markdown styles for assistant bubbles — matches our dark theme tokens.
 // react-native-markdown-display takes a flat object keyed by markdown rule
