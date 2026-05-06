@@ -53,6 +53,15 @@ type ThreadRow = {
   updatedAt?: number | string;
 };
 
+type TurnRow = {
+  id: string;
+  role: 'user' | 'assistant' | 'system' | 'tool' | 'unknown';
+  text: string;
+  status?: string;
+  createdAt?: number | string;
+  raw: unknown; // for debug rendering when nothing else parses
+};
+
 type Status =
   | { kind: 'loading' }
   | { kind: 'no-payload' }
@@ -66,6 +75,33 @@ type Status =
       mode: HandshakeMode;
       threads: ThreadRow[];
       raw: unknown;
+    }
+  | {
+      kind: 'thread-loading';
+      session: SecureSession;
+      pairing: PairingContext;
+      mode: HandshakeMode;
+      threads: ThreadRow[];
+      thread: ThreadRow;
+    }
+  | {
+      kind: 'thread-ready';
+      session: SecureSession;
+      pairing: PairingContext;
+      mode: HandshakeMode;
+      threads: ThreadRow[];
+      thread: ThreadRow;
+      turns: TurnRow[];
+      rawTurns: unknown;
+    }
+  | {
+      kind: 'thread-error';
+      session: SecureSession;
+      pairing: PairingContext;
+      mode: HandshakeMode;
+      threads: ThreadRow[];
+      thread: ThreadRow;
+      message: string;
     }
   | { kind: 'error'; message: string; code?: string; canRetry: boolean };
 
@@ -279,6 +315,71 @@ export default function PairScreen() {
     router.replace('/scan');
   }
 
+  async function openThread(thread: ThreadRow) {
+    const client = clientRef.current;
+    if (!client) return;
+    const cur = status;
+    if (cur.kind !== 'sessions-ready') return;
+
+    setStatus({
+      kind: 'thread-loading',
+      session: cur.session,
+      pairing: cur.pairing,
+      mode: cur.mode,
+      threads: cur.threads,
+      thread,
+    });
+
+    const resp = await client.sendRequest('thread/turns/list', {
+      threadId: thread.id,
+      limit: 80,
+      sortDirection: 'desc',
+    });
+
+    if (resp.ok) {
+      setStatus({
+        kind: 'thread-ready',
+        session: cur.session,
+        pairing: cur.pairing,
+        mode: cur.mode,
+        threads: cur.threads,
+        thread,
+        turns: extractTurns(resp.result),
+        rawTurns: resp.result,
+      });
+    } else {
+      setStatus({
+        kind: 'thread-error',
+        session: cur.session,
+        pairing: cur.pairing,
+        mode: cur.mode,
+        threads: cur.threads,
+        thread,
+        message: `${resp.error.message} (${resp.error.code})`,
+      });
+    }
+  }
+
+  function closeThread() {
+    setStatus((prev) => {
+      if (
+        prev.kind === 'thread-ready'
+        || prev.kind === 'thread-loading'
+        || prev.kind === 'thread-error'
+      ) {
+        return {
+          kind: 'sessions-ready',
+          session: prev.session,
+          pairing: prev.pairing,
+          mode: prev.mode,
+          threads: prev.threads,
+          raw: null,
+        };
+      }
+      return prev;
+    });
+  }
+
   return (
     <View style={styles.root}>
       <SafeAreaView edges={['top']} style={styles.topBar}>
@@ -352,7 +453,11 @@ export default function PairScreen() {
                 {status.threads.length} thread{status.threads.length === 1 ? '' : 's'}
               </Text>
             }
-            renderItem={({ item }) => <ThreadRowView thread={item} />}
+            renderItem={({ item }) => (
+              <Pressable onPress={() => openThread(item)} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+                <ThreadRowView thread={item} />
+              </Pressable>
+            )}
             contentContainerStyle={styles.listPad}
           />
           <View style={styles.footerBar}>
@@ -360,6 +465,39 @@ export default function PairScreen() {
               <Text style={styles.footerBtnText}>Re-pair</Text>
             </Pressable>
           </View>
+        </View>
+      )}
+
+      {(status.kind === 'thread-loading' || status.kind === 'thread-ready' || status.kind === 'thread-error') && (
+        <View style={{ flex: 1 }}>
+          <ThreadHeader thread={status.thread} onBack={closeThread} />
+          {status.kind === 'thread-loading' && (
+            <View style={styles.row}>
+              <ActivityIndicator color={colors.plan} />
+              <Text style={styles.body50}>Loading turns…</Text>
+            </View>
+          )}
+          {status.kind === 'thread-error' && (
+            <View style={styles.body}>
+              <Text style={[styles.title, { color: '#ff8b8b' }]}>Couldn't load turns</Text>
+              <Text style={styles.body50}>{status.message}</Text>
+              <Cta label="Back to threads" onPress={closeThread} />
+            </View>
+          )}
+          {status.kind === 'thread-ready' && (
+            <FlatList
+              data={status.turns}
+              keyExtractor={(t, i) => t.id || `turn-${i}`}
+              inverted
+              ListEmptyComponent={
+                <View style={styles.empty}>
+                  <Text style={styles.body50}>This thread has no turns yet.</Text>
+                </View>
+              }
+              renderItem={({ item }) => <TurnView turn={item} />}
+              contentContainerStyle={styles.turnsPad}
+            />
+          )}
         </View>
       )}
 
@@ -416,6 +554,142 @@ function ThreadRowView({ thread }: { thread: ThreadRow }) {
       </Text>
     </View>
   );
+}
+
+function ThreadHeader({ thread, onBack }: { thread: ThreadRow; onBack: () => void }) {
+  return (
+    <View style={styles.threadHeaderBar}>
+      <Pressable onPress={onBack} hitSlop={12} style={styles.backBtnSmall}>
+        <Icon name="chevron.left" size={18} color={colors.fg} />
+      </Pressable>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.threadHeaderTitle} numberOfLines={1}>
+          {thread.title || thread.id}
+        </Text>
+        {thread.cwd ? (
+          <Text style={styles.threadHeaderSub} numberOfLines={1}>
+            {thread.cwd}
+          </Text>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+function TurnView({ turn }: { turn: TurnRow }) {
+  const isUser = turn.role === 'user';
+  const isAssistant = turn.role === 'assistant';
+  return (
+    <View style={[styles.turnRow, isUser && styles.turnRowUser]}>
+      <Text style={[styles.turnRoleLabel, isUser && { color: colors.plan }]}>
+        {turn.role}
+      </Text>
+      <Text style={[styles.turnText, isAssistant && { color: colors.fg }]}>
+        {turn.text || '(empty)'}
+      </Text>
+    </View>
+  );
+}
+
+function extractTurns(result: unknown): TurnRow[] {
+  if (!result || typeof result !== 'object') return [];
+  const obj = result as Record<string, unknown>;
+  const list =
+    (Array.isArray(obj.data) && (obj.data as unknown[]))
+    || (Array.isArray(obj.items) && (obj.items as unknown[]))
+    || (Array.isArray(obj.turns) && (obj.turns as unknown[]))
+    || [];
+
+  const rows: TurnRow[] = [];
+  for (const t of list) {
+    if (!t || typeof t !== 'object') continue;
+    const turn = t as Record<string, unknown>;
+    const id =
+      typeof turn.id === 'string'
+        ? turn.id
+        : typeof turn.turnId === 'string'
+          ? (turn.turnId as string)
+          : '';
+
+    // A "turn" packs both the user input and the assistant's reply together.
+    // Render them as two stacked rows so the chat UI reads top-to-bottom.
+    const userText = pickText(
+      turn.userInput,
+      turn.input,
+      turn.prompt,
+      turn.userMessage,
+      turn.user,
+    );
+    const assistantText = pickText(
+      turn.assistantOutput,
+      turn.output,
+      turn.response,
+      turn.assistantMessage,
+      turn.assistant,
+      turn.text,
+    );
+
+    if (userText) {
+      rows.push({
+        id: `${id}:user`,
+        role: 'user',
+        text: userText,
+        status: typeof turn.status === 'string' ? turn.status : undefined,
+        createdAt:
+          typeof turn.createdAt === 'number' || typeof turn.createdAt === 'string'
+            ? (turn.createdAt as number | string)
+            : undefined,
+        raw: turn,
+      });
+    }
+    if (assistantText) {
+      rows.push({
+        id: `${id}:assistant`,
+        role: 'assistant',
+        text: assistantText,
+        status: typeof turn.status === 'string' ? turn.status : undefined,
+        createdAt:
+          typeof turn.completedAt === 'number' || typeof turn.completedAt === 'string'
+            ? (turn.completedAt as number | string)
+            : undefined,
+        raw: turn,
+      });
+    }
+    if (!userText && !assistantText) {
+      // Fallback: dump JSON so we can iterate on the parser.
+      rows.push({
+        id: id || `unknown-${rows.length}`,
+        role: 'unknown',
+        text: JSON.stringify(turn).slice(0, 4000),
+        raw: turn,
+      });
+    }
+  }
+  return rows;
+}
+
+function pickText(...candidates: unknown[]): string {
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) return c;
+    if (Array.isArray(c)) {
+      // Some shapes nest content as an array of {type, text} chunks (Codex/Claude style).
+      const joined = c
+        .map((part) => {
+          if (typeof part === 'string') return part;
+          if (part && typeof part === 'object' && typeof (part as any).text === 'string') {
+            return (part as any).text;
+          }
+          return '';
+        })
+        .filter(Boolean)
+        .join('\n');
+      if (joined.trim()) return joined;
+    }
+    if (c && typeof c === 'object' && typeof (c as any).text === 'string') {
+      return (c as any).text;
+    }
+  }
+  return '';
 }
 
 function extractThreads(result: unknown): ThreadRow[] {
@@ -576,5 +850,55 @@ const styles = StyleSheet.create({
     color: colors.fg,
     textAlign: 'center',
     fontWeight: weight.semibold,
+  },
+  threadHeaderBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    padding: spacing.lg,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.fg10,
+    backgroundColor: colors.bg,
+  },
+  backBtnSmall: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.fg10,
+  },
+  threadHeaderTitle: {
+    color: colors.fg,
+    fontSize: fontSize.body,
+    fontWeight: weight.semibold,
+  },
+  threadHeaderSub: {
+    color: colors.fg50,
+    fontSize: fontSize.caption,
+    fontFamily: 'Menlo',
+    marginTop: 2,
+  },
+  turnsPad: { paddingHorizontal: spacing.xl, paddingBottom: spacing.xl, paddingTop: spacing.md },
+  turnRow: {
+    paddingVertical: spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.fg10,
+    gap: 6,
+  },
+  turnRowUser: {
+    // Subtle row tint for user prompts to make the alternation read like a chat.
+  },
+  turnRoleLabel: {
+    color: colors.fg45,
+    fontSize: fontSize.caption2,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    fontWeight: weight.semibold,
+  },
+  turnText: {
+    color: colors.fg82,
+    fontSize: fontSize.body,
+    lineHeight: fontSize.body + 7,
   },
 });
