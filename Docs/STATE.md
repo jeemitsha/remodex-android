@@ -17,6 +17,45 @@ Build a **production-quality, polished, third-party Android client** for the Rem
 
 ## Where we left off (most recent → oldest)
 
+### 2026-05-06 — evening — tool grouping + welcome+drawer + markdown (commit `2f063e2`)
+
+**User feedback addressed**:
+- ✅ Chronological message order (was inverted, now top-down)
+- ✅ Tool calls collapsed by default — `Worked for {duration} · {N} steps` row, expandable; each child further expandable for command+output. Mirrors iOS Codex.
+- ✅ Welcome screen as default + drawer sidebar — no sidebar visible on launch; hamburger toggles it; tapping a thread closes drawer + opens thread.
+- ✅ Real markdown rendering via `react-native-markdown-display` for assistant text (lists, headings, bold, inline code, fenced code, blockquotes, tables, hr — all themed to our dark tokens).
+- ✅ mcpToolCall properly extracted: `server.tool` as title, `result` as output, `error` inline, `durationMs` shown.
+
+**To test on phone**: reload Expo Go (shake → Reload). Pairing flow unchanged. Once paired:
+- Welcome screen with green ✓ bubble + "Paired with {fingerprint}" + "Open sessions" CTA
+- Tap CTA or ☰ → sidebar slides in from left
+- Pick a thread → drawer closes, chat loads
+- Tool calls appear as a single "Worked for Xs" row at the spot they happened in the conversation; tap to expand
+- Assistant markdown should now render (not raw)
+- Send a prompt → optimistic user bubble at bottom + streaming assistant bubble below
+
+**New artifacts**:
+- `lib/group-turns.ts` (+ tests) — turn list → display item list with consecutive tool packing
+- `WelcomeView`, `SidebarDrawer`, `ToolGroupCard`, `ToolGroupChild` components in pair.tsx
+- `markdownStyles` in pair.tsx — dark theme tokens applied to react-native-markdown-display
+- `extract.ts` mcpToolCall handling
+
+**Captured fixtures now include**:
+- `thread-list.response.json` (top-of-list)
+- `thread-turns-list.response.json` (specific session `019dfc7c-...` requested by user — has 19 commandExecutions + 4 mcpToolCalls + 10 agentMessages + 3 userMessages, good torture-test data)
+
+**Capture script enhancements**:
+- `REMODEX_CAPTURE_THREAD_IDS=<id1>,<id2>` to pin specific sessions; first id is canonical fixture, others get `thread-turns-list.<shortid>.response.json`.
+- Limit raised from 5 to 200 turns per capture.
+
+**Next chunks** (in order, commit each):
+1. **Validate on phone** — does tool grouping look right? Markdown render correctly? Drawer feel right?
+2. **Component snapshot tests** — finally set up `@testing-library/react-native` so `MessageBubble`, `ToolGroupCard`, `CommandCard`, `ApprovalCard` get tested against fixtures. Catches "raw JSON came back" silently.
+3. **Streaming live-bubble polish** — make the assistant streaming text use the same MessageBubble look (markdown + bubble shape + caret).
+4. **Composer polish** — paper-plane icon (currently sends a qrcode SF Symbol by accident), tap-outside-to-dismiss, history scroll-to-bottom on send.
+5. **Persistent identity for `npm run capture`** — add an identity-cache file so subsequent runs use trusted_reconnect without needing a fresh QR each time. Avoids the "kill bridge to capture" disruption.
+6. **EAS dev build** (post-MVP) — installable APK, drops Expo Go dependency.
+
 ### 2026-05-06 — late afternoon — UI rebuild against fixture-backed parsers (commit `cac2c4d`)
 
 **Just shipped**:
@@ -176,3 +215,4 @@ The capture script uses an ephemeral phone identity each run, so it doesn't poll
 - **2026-05-06 early afternoon**: tasks 6-10 (thread detail, compose, approval, reconnect, sidebar fidelity); upstream PR #107 opened. *Quality not yet validated; user reported regressions in next session.*
 - **2026-05-06 mid afternoon**: pivoted to test infrastructure (vitest + capture harness + fixture-backed parsers in `extract.ts`). 51 unit tests pass. Old inline parsers in `pair.tsx` not yet swapped — that's the next step.
 - **2026-05-06 late afternoon**: swapped `pair.tsx` parsers to use `extract.ts`; rebuilt thread-detail UI as chat bubbles + command-execution cards; sidebar now shows preview + branch pill. Commit `cac2c4d`. Awaiting user phone validation.
+- **2026-05-06 evening**: chronological turn order fix; collapsible tool groups (lib/group-turns.ts); welcome+drawer layout pattern; react-native-markdown-display for assistant text; mcpToolCall extraction. Commit `2f063e2`. 57/57 tests.
