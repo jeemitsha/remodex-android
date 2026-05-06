@@ -14,6 +14,8 @@ import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
+  Dimensions,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -26,6 +28,8 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+
+import Markdown from 'react-native-markdown-display';
 
 import { Icon } from '@/lib/icons';
 import { loadOrCreatePhoneIdentity, PhoneIdentity } from '@/lib/protocol/identity';
@@ -54,6 +58,7 @@ import { colors, fontSize, radius, spacing, weight } from '@/lib/theme/tokens';
 // Thread/turn types and parsers live in lib/protocol/extract.ts so they can be
 // fixture-tested. Keep the imports here narrow.
 import { extractThreads, extractTurns, ThreadRow, TurnRow } from '@/lib/protocol/extract';
+import { DisplayItem, ToolGroup, groupTurns } from '@/lib/group-turns';
 
 type Status =
   | { kind: 'loading' }
@@ -117,6 +122,7 @@ const STAGE_LABEL: Record<HandshakeStage | 'opening' | 'connected', string> = {
 export default function PairScreen() {
   const router = useRouter();
   const [status, setStatus] = useState<Status>({ kind: 'loading' });
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const clientRef = useRef<RelayClient | null>(null);
   const pairingRef = useRef<PairingContext | null>(null);
   const modeRef = useRef<HandshakeMode>('qr_bootstrap');
@@ -390,6 +396,7 @@ export default function PairScreen() {
     const cur = status;
     if (cur.kind !== 'sessions-ready') return;
 
+    setSidebarOpen(false);
     setStatus({
       kind: 'thread-loading',
       session: cur.session,
@@ -677,57 +684,17 @@ export default function PairScreen() {
       )}
 
       {status.kind === 'sessions-ready' && (
-        <View style={{ flex: 1 }}>
-          <PairedHeader session={status.session} mode={status.mode} />
-          {status.threads.length === 0 ? (
-            <View style={styles.empty}>
-              <Text style={styles.body50}>
-                No threads returned by the bridge. Start one in Codex CLI on your Mac to see it
-                here.
-              </Text>
-            </View>
-          ) : (
-            <SectionList
-              sections={groupThreadsByProject(status.threads).map((g) => ({
-                key: g.key,
-                label: g.label,
-                fullPath: g.fullPath,
-                data: g.threads,
-              }))}
-              keyExtractor={(t, i) => t.id || `thread-${i}`}
-              stickySectionHeadersEnabled={false}
-              renderSectionHeader={({ section }) => (
-                <View style={styles.projectSectionHeader}>
-                  <Text style={styles.projectSectionLabel} numberOfLines={1}>
-                    {section.label}
-                  </Text>
-                  <Text style={styles.projectSectionCount}>
-                    {section.data.length}
-                  </Text>
-                </View>
-              )}
-              renderItem={({ item }) => (
-                <Pressable
-                  onPress={() => openThread(item)}
-                  style={({ pressed }) => pressed && { opacity: 0.6 }}>
-                  <ThreadRowView thread={item} />
-                </Pressable>
-              )}
-              ItemSeparatorComponent={() => <View style={styles.threadRowSep} />}
-              contentContainerStyle={styles.listPad}
-            />
-          )}
-          <View style={styles.footerBar}>
-            <Pressable onPress={rescan} style={styles.footerBtn}>
-              <Text style={styles.footerBtnText}>Re-pair</Text>
-            </Pressable>
-          </View>
-        </View>
+        <WelcomeView
+          session={status.session}
+          mode={status.mode}
+          threadCount={status.threads.length}
+          onOpenSidebar={() => setSidebarOpen(true)}
+        />
       )}
 
       {(status.kind === 'thread-loading' || status.kind === 'thread-ready' || status.kind === 'thread-error') && (
         <View style={{ flex: 1 }}>
-          <ThreadHeader thread={status.thread} onBack={closeThread} />
+          <ThreadHeader thread={status.thread} onMenu={() => setSidebarOpen(true)} />
           {status.kind === 'thread-loading' && (
             <View style={styles.row}>
               <ActivityIndicator color={colors.plan} />
@@ -747,8 +714,8 @@ export default function PairScreen() {
               behavior={Platform.OS === 'ios' ? 'padding' : undefined}
               keyboardVerticalOffset={0}>
               <FlatList
-                data={status.turns}
-                keyExtractor={(t, i) => t.id || `turn-${i}`}
+                data={groupTurns(status.turns) as DisplayItem[]}
+                keyExtractor={(it, i) => ('kind' in it ? it.id : it.id) || `row-${i}`}
                 ListEmptyComponent={
                   <View style={styles.empty}>
                     <Text style={styles.body50}>This thread has no turns yet.</Text>
@@ -766,13 +733,17 @@ export default function PairScreen() {
                     </View>
                   ) : null
                 }
-                renderItem={({ item }) => (
-                  <TurnView
-                    turn={item}
-                    onApprove={(t) => decideApproval(t, 'accept')}
-                    onReject={(t) => decideApproval(t, 'reject')}
-                  />
-                )}
+                renderItem={({ item }) =>
+                  'kind' in item ? (
+                    <ToolGroupCard group={item} />
+                  ) : (
+                    <TurnView
+                      turn={item}
+                      onApprove={(t) => decideApproval(t, 'accept')}
+                      onReject={(t) => decideApproval(t, 'reject')}
+                    />
+                  )
+                }
                 contentContainerStyle={styles.turnsPad}
               />
               <Composer
@@ -801,6 +772,183 @@ export default function PairScreen() {
           {status.canRetry && <Cta label="Re-pair (open scanner)" onPress={rescan} />}
         </ScrollView>
       )}
+      {/* Sidebar drawer — overlays everything when open. Slides in from the
+          left, has a tappable backdrop. Only available once we have a session
+          and threads to render. */}
+      {(status.kind === 'sessions-ready'
+        || status.kind === 'thread-loading'
+        || status.kind === 'thread-ready'
+        || status.kind === 'thread-error') && (
+        <SidebarDrawer
+          visible={sidebarOpen}
+          threads={status.threads}
+          activeThreadId={
+            status.kind === 'thread-loading' || status.kind === 'thread-ready' || status.kind === 'thread-error'
+              ? status.thread.id
+              : null
+          }
+          onSelect={openThread}
+          onClose={() => setSidebarOpen(false)}
+          onRescan={rescan}
+        />
+      )}
+    </View>
+  );
+}
+
+function WelcomeView({
+  session,
+  mode,
+  threadCount,
+  onOpenSidebar,
+}: {
+  session: SecureSession;
+  mode: HandshakeMode;
+  threadCount: number;
+  onOpenSidebar: () => void;
+}) {
+  return (
+    <View style={styles.welcomeRoot}>
+      <Pressable onPress={onOpenSidebar} hitSlop={12} style={styles.welcomeHamburger}>
+        <Text style={styles.welcomeHamburgerIcon}>☰</Text>
+      </Pressable>
+
+      <View style={styles.welcomeCenter}>
+        <View style={styles.welcomeIconBubble}>
+          <Icon name="checkmark" size={36} color={colors.bg} />
+        </View>
+        <Text style={styles.welcomeTitle}>
+          {mode === 'trusted_reconnect' ? 'Reconnected' : 'Paired'}
+        </Text>
+        <Text style={styles.welcomeSub}>
+          End-to-end encrypted with {fingerprint(session.macIdentityPublicKey)}
+        </Text>
+        <Text style={styles.welcomeCount}>
+          {threadCount} thread{threadCount === 1 ? '' : 's'} ready
+        </Text>
+        <PrimaryWelcomeBtn label="Open sessions" onPress={onOpenSidebar} />
+        <Text style={styles.welcomeHint}>
+          Or swipe in from the left
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+function PrimaryWelcomeBtn({ label, onPress }: { label: string; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.welcomePrimaryBtn, pressed && { opacity: 0.85 }]}>
+      <Text style={styles.welcomePrimaryBtnText}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function SidebarDrawer({
+  visible,
+  threads,
+  activeThreadId,
+  onSelect,
+  onClose,
+  onRescan,
+}: {
+  visible: boolean;
+  threads: ThreadRow[];
+  activeThreadId: string | null;
+  onSelect: (t: ThreadRow) => void;
+  onClose: () => void;
+  onRescan: () => void;
+}) {
+  const screenW = Dimensions.get('window').width;
+  const drawerWidth = Math.min(360, Math.round(screenW * 0.82));
+  const slide = useRef(new Animated.Value(visible ? 0 : -drawerWidth)).current;
+  const backdropOpacity = useRef(new Animated.Value(visible ? 1 : 0)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(slide, {
+        toValue: visible ? 0 : -drawerWidth,
+        duration: 220,
+        useNativeDriver: true,
+      }),
+      Animated.timing(backdropOpacity, {
+        toValue: visible ? 1 : 0,
+        duration: 220,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [visible, drawerWidth, slide, backdropOpacity]);
+
+  if (!visible && (slide as any)._value === -drawerWidth) {
+    // Fully off-screen + backdrop hidden → don't waste rendering. The
+    // pointerEvents trick below is enough during animation.
+  }
+
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents={visible ? 'auto' : 'box-none'}>
+      <Animated.View
+        pointerEvents={visible ? 'auto' : 'none'}
+        style={[styles.drawerBackdrop, { opacity: backdropOpacity }]}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+      </Animated.View>
+      <Animated.View
+        style={[
+          styles.drawer,
+          { width: drawerWidth, transform: [{ translateX: slide }] },
+        ]}>
+        <SafeAreaView edges={['top']} style={styles.drawerHeader}>
+          <Text style={styles.drawerTitle}>Sessions</Text>
+          <Text style={styles.drawerCount}>
+            {threads.length}
+          </Text>
+        </SafeAreaView>
+        {threads.length === 0 ? (
+          <View style={styles.empty}>
+            <Text style={styles.body50}>
+              No threads. Start one in Codex CLI on your Mac.
+            </Text>
+          </View>
+        ) : (
+          <SectionList
+            sections={groupThreadsByProject(threads).map((g) => ({
+              key: g.key,
+              label: g.label,
+              fullPath: g.fullPath,
+              data: g.threads,
+            }))}
+            keyExtractor={(t, i) => t.id || `thread-${i}`}
+            stickySectionHeadersEnabled={false}
+            renderSectionHeader={({ section }) => (
+              <View style={styles.projectSectionHeader}>
+                <Text style={styles.projectSectionLabel} numberOfLines={1}>
+                  {section.label}
+                </Text>
+                <Text style={styles.projectSectionCount}>
+                  {section.data.length}
+                </Text>
+              </View>
+            )}
+            renderItem={({ item }) => (
+              <Pressable
+                onPress={() => onSelect(item)}
+                style={({ pressed }) => [
+                  pressed && { opacity: 0.6 },
+                  item.id === activeThreadId && styles.threadRowActive,
+                ]}>
+                <ThreadRowView thread={item} />
+              </Pressable>
+            )}
+            ItemSeparatorComponent={() => <View style={styles.threadRowSep} />}
+            contentContainerStyle={styles.listPad}
+          />
+        )}
+        <View style={styles.drawerFooter}>
+          <Pressable onPress={onRescan} style={styles.footerBtn}>
+            <Text style={styles.footerBtnText}>Re-pair</Text>
+          </Pressable>
+        </View>
+      </Animated.View>
     </View>
   );
 }
@@ -855,23 +1003,25 @@ function ThreadRowView({ thread }: { thread: ThreadRow }) {
   );
 }
 
-function ThreadHeader({ thread, onBack }: { thread: ThreadRow; onBack: () => void }) {
+function ThreadHeader({ thread, onMenu }: { thread: ThreadRow; onMenu: () => void }) {
   return (
-    <View style={styles.threadHeaderBar}>
-      <Pressable onPress={onBack} hitSlop={12} style={styles.backBtnSmall}>
-        <Icon name="chevron.left" size={18} color={colors.fg} />
-      </Pressable>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.threadHeaderTitle} numberOfLines={1}>
-          {thread.title || thread.id}
-        </Text>
-        {thread.cwd ? (
-          <Text style={styles.threadHeaderSub} numberOfLines={1}>
-            {thread.cwd}
+    <SafeAreaView edges={['top']}>
+      <View style={styles.threadHeaderBar}>
+        <Pressable onPress={onMenu} hitSlop={12} style={styles.backBtnSmall}>
+          <Text style={styles.welcomeHamburgerIcon}>☰</Text>
+        </Pressable>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.threadHeaderTitle} numberOfLines={1}>
+            {thread.title || thread.id}
           </Text>
-        ) : null}
+          {thread.cwd ? (
+            <Text style={styles.threadHeaderSub} numberOfLines={1}>
+              {thread.cwd}
+            </Text>
+          ) : null}
+        </View>
       </View>
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -943,34 +1093,96 @@ function TurnView({
 }
 
 function MessageBubble({ turn, side }: { turn: TurnRow; side: 'left' | 'right' }) {
-  const blocks = parseMarkdownBlocks(turn.text);
+  // Assistant text gets full markdown rendering; user text stays plain since it's
+  // what they typed (markdown in user prompts is uncommon and would mis-render
+  // file paths like `*.tsx` as italics).
   return (
     <View style={[styles.bubbleRow, side === 'right' ? styles.bubbleRowRight : styles.bubbleRowLeft]}>
       <View style={[styles.bubble, side === 'right' ? styles.bubbleUser : styles.bubbleAssistant]}>
-        {blocks.map((b, i) =>
-          b.type === 'code' ? (
-            <CodeBlock key={i} language={b.language} text={b.text} />
-          ) : (
-            <Text key={i} style={[styles.bubbleText, side === 'right' && styles.bubbleTextUser]}>
-              {b.text}
-            </Text>
-          ),
+        {side === 'left' ? (
+          <Markdown style={markdownStyles}>{turn.text}</Markdown>
+        ) : (
+          <Text style={[styles.bubbleText, styles.bubbleTextUser]}>{turn.text}</Text>
         )}
       </View>
     </View>
   );
 }
 
-function CodeBlock({ language, text }: { language?: string; text: string }) {
+function ToolGroupCard({ group }: { group: ToolGroup }) {
+  const [expanded, setExpanded] = useState(false);
+  const label = group.totalDurationMs > 0
+    ? `Worked for ${formatDuration(group.totalDurationMs)}`
+    : `Ran ${group.tools.length} tool${group.tools.length === 1 ? '' : 's'}`;
+  const sublabel = group.failureCount > 0
+    ? ` · ${group.failureCount} failure${group.failureCount === 1 ? '' : 's'}`
+    : ` · ${group.tools.length} step${group.tools.length === 1 ? '' : 's'}`;
+
   return (
-    <View style={styles.codeBlock}>
-      {language ? <Text style={styles.codeBlockLang}>{language}</Text> : null}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={{ paddingRight: spacing.md }}>
-        <Text style={styles.codeBlockText}>{text}</Text>
-      </ScrollView>
+    <View style={styles.toolGroup}>
+      <Pressable
+        onPress={() => setExpanded((e) => !e)}
+        style={({ pressed }) => [styles.toolGroupHeader, pressed && { opacity: 0.7 }]}>
+        <Icon
+          name={expanded ? 'chevron.left' /* rotated via transform */ : 'chevron.left'}
+          size={12}
+          color={colors.fg45}
+        />
+        <Text style={styles.toolGroupChevron}>{expanded ? '▾' : '▸'}</Text>
+        <Text style={styles.toolGroupLabel}>{label}</Text>
+        <Text style={styles.toolGroupSub}>{sublabel}</Text>
+      </Pressable>
+      {expanded ? (
+        <View style={styles.toolGroupChildren}>
+          {group.tools.map((t) => (
+            <ToolGroupChild key={t.id} turn={t} />
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function ToolGroupChild({ turn }: { turn: TurnRow }) {
+  const [expanded, setExpanded] = useState(false);
+  const exitOk = turn.exitCode === undefined ? null : turn.exitCode === 0;
+  return (
+    <View style={styles.toolChild}>
+      <Pressable
+        onPress={() => setExpanded((e) => !e)}
+        style={({ pressed }) => [styles.toolChildHeader, pressed && { opacity: 0.7 }]}>
+        <Text style={styles.toolGroupChevron}>{expanded ? '▾' : '▸'}</Text>
+        <Text style={styles.toolChildCommand} numberOfLines={1} ellipsizeMode="middle">
+          {turn.command || '(tool)'}
+        </Text>
+        <Text
+          style={[
+            styles.toolChildStatus,
+            exitOk === false ? { color: '#ff8b8b' } : { color: colors.fg45 },
+          ]}>
+          {exitOk === true
+            ? '✓'
+            : exitOk === false
+              ? `✕${turn.exitCode}`
+              : turn.toolStatus || ''}
+        </Text>
+        {turn.durationMs ? (
+          <Text style={styles.toolChildDuration}>{formatDuration(turn.durationMs)}</Text>
+        ) : null}
+      </Pressable>
+      {expanded ? (
+        <View style={styles.toolChildBody}>
+          {turn.command ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ paddingRight: spacing.md }}>
+              <Text style={styles.cmdCommand}>{`$ ${turn.command}`}</Text>
+            </ScrollView>
+          ) : null}
+          {turn.output ? <CommandOutput text={turn.output} /> : null}
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -1065,44 +1277,68 @@ function formatDuration(ms: number): string {
   return `${Math.round(s / 60)}m`;
 }
 
-// Minimal markdown-ish split: extracts ```fenced``` code blocks with optional
-// language tag, leaves everything else as plain text. Real markdown rendering
-// (lists, bold, headings, inline code) is a later pass — we'd add
-// react-native-markdown-display once we accept the bundle-size hit.
-type MarkdownBlock = { type: 'text'; text: string } | { type: 'code'; language?: string; text: string };
-function parseMarkdownBlocks(input: string): MarkdownBlock[] {
-  const blocks: MarkdownBlock[] = [];
-  const lines = input.split('\n');
-  let i = 0;
-  let buffer: string[] = [];
-  const flushText = () => {
-    if (buffer.length === 0) return;
-    const text = buffer.join('\n').trim();
-    if (text) blocks.push({ type: 'text', text });
-    buffer = [];
-  };
-  while (i < lines.length) {
-    const line = lines[i];
-    const fence = line.match(/^```(\w+)?\s*$/);
-    if (fence) {
-      flushText();
-      const language = fence[1];
-      const codeLines: string[] = [];
-      i++;
-      while (i < lines.length && !/^```\s*$/.test(lines[i])) {
-        codeLines.push(lines[i]);
-        i++;
-      }
-      blocks.push({ type: 'code', language, text: codeLines.join('\n') });
-      i++; // skip closing fence
-      continue;
-    }
-    buffer.push(line);
-    i++;
-  }
-  flushText();
-  return blocks.length > 0 ? blocks : [{ type: 'text', text: input }];
-}
+// Markdown styles for assistant bubbles — matches our dark theme tokens.
+// react-native-markdown-display takes a flat object keyed by markdown rule
+// names; we override the ones that show up the most in chat content.
+const markdownStyles = StyleSheet.create({
+  body: { color: colors.fg82, fontSize: fontSize.body, lineHeight: fontSize.body + 7 },
+  heading1: { color: colors.fg, fontSize: fontSize.title2, fontWeight: '700', marginTop: 8, marginBottom: 4 },
+  heading2: { color: colors.fg, fontSize: fontSize.title3, fontWeight: '700', marginTop: 8, marginBottom: 4 },
+  heading3: { color: colors.fg, fontSize: fontSize.headline, fontWeight: '600', marginTop: 6, marginBottom: 2 },
+  heading4: { color: colors.fg, fontSize: fontSize.body, fontWeight: '600', marginTop: 6, marginBottom: 2 },
+  strong: { color: colors.fg, fontWeight: '700' },
+  em: { fontStyle: 'italic' },
+  link: { color: colors.plan, textDecorationLine: 'underline' },
+  bullet_list: { marginVertical: 4 },
+  ordered_list: { marginVertical: 4 },
+  list_item: { marginVertical: 2 },
+  bullet_list_icon: { color: colors.fg45 },
+  ordered_list_icon: { color: colors.fg45 },
+  code_inline: {
+    color: colors.fg,
+    backgroundColor: colors.bg,
+    fontFamily: 'Menlo',
+    fontSize: fontSize.footnote + 1,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  fence: {
+    backgroundColor: colors.bg,
+    color: colors.fg,
+    fontFamily: 'Menlo',
+    fontSize: fontSize.footnote,
+    padding: spacing.sm,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.fg10,
+    marginVertical: 6,
+  },
+  code_block: {
+    backgroundColor: colors.bg,
+    color: colors.fg,
+    fontFamily: 'Menlo',
+    fontSize: fontSize.footnote,
+    padding: spacing.sm,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.fg10,
+    marginVertical: 6,
+  },
+  blockquote: {
+    backgroundColor: colors.fg5,
+    borderLeftColor: colors.plan,
+    borderLeftWidth: 3,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    marginVertical: 4,
+  },
+  hr: { backgroundColor: colors.fg10, height: 1, marginVertical: spacing.sm },
+  table: { borderColor: colors.fg10, borderWidth: 1, borderRadius: radius.sm, marginVertical: 6 },
+  thead: { backgroundColor: colors.fg5 },
+  th: { color: colors.fg, fontWeight: '600', padding: 6 },
+  td: { color: colors.fg82, padding: 6 },
+});
 
 function ApprovalCard({
   turn,
@@ -1272,6 +1508,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.sm,
     paddingVertical: spacing.md,
+  },
+  threadRowActive: {
+    backgroundColor: colors.fg6,
+    borderRadius: radius.md,
   },
   threadRowSep: {
     height: StyleSheet.hairlineWidth,
@@ -1592,6 +1832,179 @@ const styles = StyleSheet.create({
     color: colors.plan,
     fontSize: fontSize.caption,
     fontWeight: weight.medium,
+  },
+
+  // ---- Welcome view (shown when paired but no thread selected)
+  welcomeRoot: { flex: 1 },
+  welcomeHamburger: {
+    position: 'absolute',
+    top: 56,
+    left: spacing.xl,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.fg10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10,
+  },
+  welcomeHamburgerIcon: {
+    color: colors.fg,
+    fontSize: 22,
+    lineHeight: 24,
+  },
+  welcomeCenter: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.xxxl,
+    gap: spacing.lg,
+  },
+  welcomeIconBubble: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: '#9be39a',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  welcomeTitle: {
+    color: colors.fg,
+    fontSize: fontSize.pageHero,
+    fontWeight: weight.bold,
+  },
+  welcomeSub: {
+    color: colors.fg50,
+    fontSize: fontSize.subheadline,
+    fontFamily: 'Menlo',
+    textAlign: 'center',
+  },
+  welcomeCount: {
+    color: colors.fg45,
+    fontSize: fontSize.caption,
+    marginTop: -spacing.sm,
+  },
+  welcomePrimaryBtn: {
+    marginTop: spacing.lg,
+    paddingHorizontal: spacing.xl + 4,
+    paddingVertical: 14,
+    borderRadius: radius.capsule,
+    backgroundColor: colors.fg,
+  },
+  welcomePrimaryBtnText: {
+    color: colors.bg,
+    fontSize: fontSize.body,
+    fontWeight: weight.semibold,
+  },
+  welcomeHint: { color: colors.fg45, fontSize: fontSize.caption },
+
+  // ---- Drawer (sidebar overlay)
+  drawerBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
+  drawer: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    backgroundColor: colors.bg,
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderRightColor: colors.fg10,
+  },
+  drawerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.fg10,
+  },
+  drawerTitle: {
+    color: colors.fg,
+    fontSize: fontSize.title3,
+    fontWeight: weight.bold,
+  },
+  drawerCount: {
+    color: colors.fg45,
+    fontSize: fontSize.caption,
+    fontFamily: 'Menlo',
+  },
+  drawerFooter: {
+    padding: spacing.lg,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.fg10,
+  },
+
+  // ---- Tool group (collapsible "Worked for Xs")
+  toolGroup: {
+    marginVertical: spacing.sm,
+    borderRadius: radius.card,
+    backgroundColor: colors.fg5,
+    borderWidth: 1,
+    borderColor: colors.fg10,
+    overflow: 'hidden',
+  },
+  toolGroupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 2,
+  },
+  toolGroupChevron: {
+    color: colors.fg45,
+    fontSize: 14,
+    fontFamily: 'Menlo',
+  },
+  toolGroupLabel: {
+    color: colors.fg82,
+    fontSize: fontSize.subheadline,
+    fontWeight: weight.medium,
+  },
+  toolGroupSub: {
+    color: colors.fg45,
+    fontSize: fontSize.caption,
+    flex: 1,
+  },
+  toolGroupChildren: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.fg10,
+    paddingVertical: 4,
+  },
+  toolChild: {
+    paddingHorizontal: spacing.md,
+  },
+  toolChildHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.sm,
+  },
+  toolChildCommand: {
+    flex: 1,
+    color: colors.fg,
+    fontFamily: 'Menlo',
+    fontSize: fontSize.footnote,
+  },
+  toolChildStatus: {
+    fontSize: fontSize.caption,
+    fontFamily: 'Menlo',
+    fontWeight: weight.medium,
+  },
+  toolChildDuration: {
+    color: colors.fg45,
+    fontSize: fontSize.caption2,
+    fontFamily: 'Menlo',
+    minWidth: 32,
+    textAlign: 'right',
+  },
+  toolChildBody: {
+    paddingVertical: spacing.sm,
+    paddingLeft: spacing.lg,
+    gap: spacing.sm,
   },
 
   // ---- System / reasoning rows
