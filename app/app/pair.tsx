@@ -59,7 +59,13 @@ import {
   SecureSession,
 } from '@/lib/protocol/secureTransport';
 import { resolveTrustedSession } from '@/lib/protocol/trustedSessionResolve';
-import { applyGroupLimit, groupThreadsByProject, relativeTime, statusColor } from '@/lib/sidebar';
+import {
+  applyGroupLimit,
+  filterActiveThreads,
+  relativeTime,
+  splitProjectsAndChats,
+  statusColor,
+} from '@/lib/sidebar';
 import { pendingPairing } from '@/lib/state/pendingPairing';
 import {
   clearSavedPairing,
@@ -1151,6 +1157,74 @@ function PrimaryWelcomeBtn({ label, onPress }: { label: string; onPress: () => v
   );
 }
 
+type SidebarSection = {
+  key: string;
+  label: string;
+  fullPath: string;
+  hiddenCount: number;
+  totalCount: number;
+  isChats: boolean;
+  data: ThreadRow[];
+};
+
+// Builds the SectionList sections from the raw threads list:
+//   1. drops archived threads
+//   2. groups the rest by cwd → project sections
+//   3. moves cwd-less threads into a "Chats" section pinned at the bottom
+//   4. caps each section at SIDEBAR_THREADS_PER_GROUP (with the active thread
+//      pinned so it never disappears behind "Show all")
+function buildSidebarSections(
+  threads: ThreadRow[],
+  limit: number,
+  expandedKeys: ReadonlySet<string>,
+  activeThreadId: string | null,
+): SidebarSection[] {
+  const active = filterActiveThreads(threads);
+  const { projects, chats } = splitProjectsAndChats(active);
+  const pinned = activeThreadId ? new Set([activeThreadId]) : undefined;
+
+  const projectSections: SidebarSection[] = applyGroupLimit(
+    projects,
+    limit,
+    expandedKeys,
+    pinned,
+  ).map((g) => ({
+    key: g.key,
+    label: g.label,
+    fullPath: g.fullPath,
+    hiddenCount: g.hiddenCount,
+    totalCount: g.threads.length,
+    isChats: false,
+    data: g.visible,
+  }));
+
+  if (chats.length === 0) return projectSections;
+
+  // Chats section at the bottom — same limit, also honors the active-thread pin.
+  const chatsExpanded = expandedKeys.has('__chats__');
+  let chatVisible = chatsExpanded || chats.length <= limit ? chats : chats.slice(0, limit);
+  let chatsHidden = chatsExpanded ? 0 : Math.max(0, chats.length - chatVisible.length);
+  if (!chatsExpanded && activeThreadId && chats.length > limit) {
+    const tail = chats.slice(limit);
+    const pinnedFromTail = tail.filter((t) => t.id === activeThreadId);
+    if (pinnedFromTail.length > 0) {
+      chatVisible = [...chats.slice(0, limit), ...pinnedFromTail];
+      chatsHidden = chats.length - chatVisible.length;
+    }
+  }
+
+  projectSections.push({
+    key: '__chats__',
+    label: 'Chats',
+    fullPath: '',
+    hiddenCount: chatsHidden,
+    totalCount: chats.length,
+    isChats: true,
+    data: chatVisible,
+  });
+  return projectSections;
+}
+
 // activeThreadId is also used as a "pinned" id passed into applyGroupLimit so
 // the open thread never falls behind "Show all" if it's older than the top-5.
 function SidebarDrawer({
@@ -1226,29 +1300,22 @@ function SidebarDrawer({
           </View>
         ) : (
           <SectionList
-            sections={applyGroupLimit(
-              groupThreadsByProject(threads),
+            sections={buildSidebarSections(
+              threads,
               SIDEBAR_THREADS_PER_GROUP,
               expandedGroups,
-              activeThreadId ? new Set([activeThreadId]) : undefined,
-            ).map((g) => ({
-              key: g.key,
-              label: g.label,
-              fullPath: g.fullPath,
-              hiddenCount: g.hiddenCount,
-              totalCount: g.threads.length,
-              data: g.visible,
-            }))}
+              activeThreadId,
+            )}
             keyExtractor={(t, i) => t.id || `thread-${i}`}
             stickySectionHeadersEnabled={false}
             renderSectionHeader={({ section }) => (
-              <View style={styles.projectSectionHeader}>
-                <Text style={styles.projectSectionLabel} numberOfLines={1}>
+              <View style={section.isChats ? styles.chatsSectionHeader : styles.projectSectionHeader}>
+                <Text
+                  style={section.isChats ? styles.chatsSectionLabel : styles.projectSectionLabel}
+                  numberOfLines={1}>
                   {section.label}
                 </Text>
-                <Text style={styles.projectSectionCount}>
-                  {section.totalCount}
-                </Text>
+                <Text style={styles.projectSectionCount}>{section.totalCount}</Text>
               </View>
             )}
             renderSectionFooter={({ section }) =>
@@ -2517,6 +2584,27 @@ const styles = StyleSheet.create({
     color: colors.fg,
     fontSize: fontSize.subheadline,
     fontWeight: weight.semibold,
+    flex: 1,
+  },
+  // The "Chats" section header is set apart with a top divider so it visually
+  // separates the bottom-pinned chats list from the project groups above.
+  chatsSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.lg + 4,
+    paddingBottom: spacing.sm,
+    gap: spacing.sm,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.fg10,
+    marginTop: spacing.md,
+  },
+  chatsSectionLabel: {
+    color: colors.fg45,
+    fontSize: fontSize.footnote,
+    fontWeight: weight.semibold,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
     flex: 1,
   },
   projectSectionCount: {

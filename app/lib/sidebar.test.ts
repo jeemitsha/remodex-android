@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { applyGroupLimit, groupThreadsByProject, relativeTime, statusColor } from './sidebar';
+import {
+  applyGroupLimit,
+  filterActiveThreads,
+  groupThreadsByProject,
+  isArchivedStatus,
+  relativeTime,
+  splitProjectsAndChats,
+  statusColor,
+} from './sidebar';
 
 describe('groupThreadsByProject', () => {
   it('groups threads by their cwd path with basename labels', () => {
@@ -139,6 +147,46 @@ describe('applyGroupLimit', () => {
       expect(out[i].fullPath).toBe(groups[i].fullPath);
       expect(out[i].threads).toBe(groups[i].threads);
     }
+  });
+});
+
+describe('isArchivedStatus / filterActiveThreads', () => {
+  it('matches both archived and archived_local (case-insensitive)', () => {
+    expect(isArchivedStatus('archived')).toBe(true);
+    expect(isArchivedStatus('Archived_Local')).toBe(true);
+    expect(isArchivedStatus('completed')).toBe(false);
+    expect(isArchivedStatus(undefined)).toBe(false);
+  });
+
+  it('drops archived threads from the active list', () => {
+    const out = filterActiveThreads([
+      { id: 'live', status: 'running' },
+      { id: 'old', status: 'archived' },
+      { id: 'idle' }, // no status → kept
+      { id: 'archived-local', status: 'archived_local' },
+    ]);
+    expect(out.map((t) => t.id)).toEqual(['live', 'idle']);
+  });
+});
+
+describe('splitProjectsAndChats', () => {
+  it('moves cwd-less threads into chats and keeps cwd-bound ones in projects', () => {
+    const out = splitProjectsAndChats([
+      { id: 'a', cwd: '/Users/dev/auth', updatedAt: 1 },
+      { id: 'b', updatedAt: 2 }, // no cwd → chat
+      { id: 'c', cwd: '/Users/dev/auth', updatedAt: 3 },
+      { id: 'd', updatedAt: 4 }, // no cwd → chat
+    ]);
+    expect(out.projects).toHaveLength(1);
+    expect(out.projects[0].label).toBe('auth');
+    expect(out.projects[0].threads.map((t) => t.id)).toEqual(['c', 'a']);
+    expect(out.chats.map((t) => t.id)).toEqual(['d', 'b']);
+  });
+
+  it('returns empty chats array when every thread has a cwd', () => {
+    const out = splitProjectsAndChats([{ id: 'a', cwd: '/p', updatedAt: 1 }]);
+    expect(out.chats).toEqual([]);
+    expect(out.projects).toHaveLength(1);
   });
 });
 

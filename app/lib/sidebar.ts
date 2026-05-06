@@ -98,6 +98,38 @@ export function relativeTime(updatedAt: number | string | undefined, now: number
   return `${Math.round(months / 12)}y`;
 }
 
+// True for statuses the bridge marks as archived. iOS filters these out of
+// the sidebar entirely; we mirror that — archived chats are reachable via the
+// bridge's archive view, not the live sidebar.
+export function isArchivedStatus(status: string | undefined): boolean {
+  if (!status) return false;
+  const s = status.toLowerCase();
+  return s === 'archived' || s === 'archived_local';
+}
+
+export function filterActiveThreads<T extends { status?: string }>(threads: T[]): T[] {
+  return threads.filter((t) => !isArchivedStatus(t.status));
+}
+
+// Splits threads into project-bound groups (with cwd) and project-less chats.
+// Mirrors iOS where the bottom of the sidebar pins a separate "Chats" section
+// for ad-hoc threads not tied to a code project.
+export function splitProjectsAndChats<T extends ThreadLike>(threads: T[]): {
+  projects: ThreadGroup<T>[];
+  chats: T[];
+} {
+  const projects: ThreadGroup<T>[] = [];
+  let chats: T[] = [];
+  for (const g of groupThreadsByProject(threads)) {
+    if (g.key === '__no_cwd__') {
+      chats = g.threads;
+    } else {
+      projects.push(g);
+    }
+  }
+  return { projects, chats };
+}
+
 export function statusColor(status: string | undefined): string | null {
   if (!status) return null;
   const s = status.toLowerCase();
