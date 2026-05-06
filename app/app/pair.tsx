@@ -631,15 +631,6 @@ export default function PairScreen() {
 
   return (
     <View style={styles.root}>
-      <SafeAreaView edges={['top']} style={styles.topBar}>
-        <Pressable
-          onPress={() => router.replace('/')}
-          hitSlop={12}
-          style={styles.backBtn}>
-          <Icon name="chevron.left" size={20} color={colors.fg} />
-        </Pressable>
-      </SafeAreaView>
-
       {status.kind === 'loading' && <Centered>Loading identity…</Centered>}
 
       {status.kind === 'no-payload' && (
@@ -723,13 +714,10 @@ export default function PairScreen() {
                 }
                 ListFooterComponent={
                   status.streamingText ? (
-                    <View style={[styles.bubbleRow, styles.bubbleRowLeft]}>
-                      <View style={[styles.bubble, styles.bubbleAssistant]}>
-                        <Text style={styles.bubbleText}>
-                          {status.streamingText}
-                          <Text style={{ color: colors.fg45 }}>▍</Text>
-                        </Text>
-                      </View>
+                    <View style={styles.assistantBlock}>
+                      <Markdown style={markdownStyles}>
+                        {status.streamingText + ' ▍'}
+                      </Markdown>
                     </View>
                   ) : null
                 }
@@ -1093,18 +1081,22 @@ function TurnView({
 }
 
 function MessageBubble({ turn, side }: { turn: TurnRow; side: 'left' | 'right' }) {
-  // Assistant text gets full markdown rendering; user text stays plain since it's
-  // what they typed (markdown in user prompts is uncommon and would mis-render
-  // file paths like `*.tsx` as italics).
-  return (
-    <View style={[styles.bubbleRow, side === 'right' ? styles.bubbleRowRight : styles.bubbleRowLeft]}>
-      <View style={[styles.bubble, side === 'right' ? styles.bubbleUser : styles.bubbleAssistant]}>
-        {side === 'left' ? (
-          <Markdown style={markdownStyles}>{turn.text}</Markdown>
-        ) : (
-          <Text style={[styles.bubbleText, styles.bubbleTextUser]}>{turn.text}</Text>
-        )}
+  // iOS-Codex style: only user prompts are bubble'd (right-aligned dark
+  // rectangle with uniform rounded corners). Assistant responses render
+  // edge-to-edge on the bg with full markdown — bubbles would constrain text
+  // width and break the airy reading layout the user wants.
+  if (side === 'right') {
+    return (
+      <View style={styles.bubbleRow_right}>
+        <View style={styles.bubble_user}>
+          <Text style={styles.bubble_userText}>{turn.text}</Text>
+        </View>
       </View>
+    );
+  }
+  return (
+    <View style={styles.assistantBlock}>
+      <Markdown style={markdownStyles}>{turn.text}</Markdown>
     </View>
   );
 }
@@ -1289,11 +1281,16 @@ const markdownStyles = StyleSheet.create({
   strong: { color: colors.fg, fontWeight: '700' },
   em: { fontStyle: 'italic' },
   link: { color: colors.plan, textDecorationLine: 'underline' },
-  bullet_list: { marginVertical: 4 },
-  ordered_list: { marginVertical: 4 },
-  list_item: { marginVertical: 2 },
-  bullet_list_icon: { color: colors.fg45 },
-  ordered_list_icon: { color: colors.fg45 },
+  // Minimal indentation — iOS-Codex style. Default react-native-markdown-display
+  // sets icon margins to 10/10 (20pt total), pushing text far right. We pull it
+  // way in: 0/6, plus zero list margin, so bullets sit just inside the bubble.
+  bullet_list: { marginVertical: 4, marginLeft: 0 },
+  ordered_list: { marginVertical: 4, marginLeft: 0 },
+  list_item: { marginVertical: 2, flexDirection: 'row' },
+  bullet_list_icon: { color: colors.fg45, marginLeft: 0, marginRight: 6, lineHeight: fontSize.body + 7 },
+  ordered_list_icon: { color: colors.fg45, marginLeft: 0, marginRight: 6, lineHeight: fontSize.body + 7 },
+  bullet_list_content: { flex: 1 },
+  ordered_list_content: { flex: 1 },
   code_inline: {
     color: colors.fg,
     backgroundColor: colors.bg,
@@ -1718,35 +1715,24 @@ const styles = StyleSheet.create({
   },
   approvalApproveText: { color: colors.fg, fontWeight: weight.semibold },
 
-  // ---- Chat bubbles (user / assistant)
-  bubbleRow: { paddingVertical: 4 },
-  bubbleRowLeft: { alignItems: 'flex-start' },
-  bubbleRowRight: { alignItems: 'flex-end' },
-  bubble: {
-    maxWidth: '88%',
-    paddingHorizontal: spacing.md + 2,
+  // ---- Bubbles (user only) and assistant block (full-width plain)
+  bubbleRow_right: { alignItems: 'flex-end', paddingVertical: 4 },
+  bubble_user: {
+    maxWidth: '85%',
+    paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm + 2,
     borderRadius: radius.card,
-    gap: spacing.sm,
+    backgroundColor: colors.fg10,
   },
-  bubbleAssistant: {
-    backgroundColor: colors.fg5,
-    borderWidth: 1,
-    borderColor: colors.fg7,
-    borderTopLeftRadius: 4,
-  },
-  bubbleUser: {
-    backgroundColor: 'rgba(0,150,255,0.18)',
-    borderWidth: 1,
-    borderColor: colors.planBorderTop,
-    borderTopRightRadius: 4,
-  },
-  bubbleText: {
-    color: colors.fg82,
+  bubble_userText: {
+    color: colors.fg,
     fontSize: fontSize.body,
     lineHeight: fontSize.body + 7,
   },
-  bubbleTextUser: { color: colors.fg },
+  assistantBlock: {
+    paddingVertical: spacing.sm,
+    paddingHorizontal: 0,
+  },
 
   // ---- Code blocks (inside bubbles)
   codeBlock: {
