@@ -222,6 +222,10 @@ export default function PairScreen() {
   const turnsListRef = useRef<FlatList | null>(null);
   const lastOpenedThreadRef = useRef<string | null>(null);
   const needsScrollToBottomRef = useRef(false);
+  // If the user taps a cached thread before the bridge has finished
+  // handshaking, hold the request here. As soon as `sessions-ready` arrives,
+  // a useEffect below drains it via openThread.
+  const pendingThreadOpenRef = useRef<ThreadRow | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -577,8 +581,21 @@ export default function PairScreen() {
 
   async function openThread(thread: ThreadRow) {
     const client = clientRef.current;
-    if (!client) return;
     const cur = status;
+    // Tapped from cached state? Queue the open and wait for sessions-ready.
+    // The drain effect below picks it up automatically. Close the drawer so
+    // the user sees the bar progressing rather than a frozen sidebar.
+    const stillHandshaking =
+      cur.kind === 'loading'
+      || cur.kind === 'connecting'
+      || cur.kind === 'paired'
+      || cur.kind === 'sessions-loading';
+    if (stillHandshaking) {
+      pendingThreadOpenRef.current = thread;
+      setSidebarOpen(false);
+      return;
+    }
+    if (!client) return;
     // Accept opens from any post-pair state — the user may switch from one
     // open thread (`thread-ready`) to another, retry from `thread-error`,
     // or jump in mid-load from `thread-loading`. Earlier we only allowed
@@ -1106,6 +1123,18 @@ export default function PairScreen() {
     needsScrollToBottomRef.current = true;
   }
 
+  // Drain any thread-open queued while we were still handshaking.
+  useEffect(() => {
+    if (status.kind !== 'sessions-ready') return;
+    const pending = pendingThreadOpenRef.current;
+    if (!pending) return;
+    pendingThreadOpenRef.current = null;
+    void openThread(pending);
+    // Intentionally not depending on openThread (it's defined in this same
+    // component closure and stable enough for this effect).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status.kind]);
+
   // True while the bridge handshake / thread/list is still in flight. Drives
   // the thin top progress bar + the stale-while-revalidate welcome render
   // when we have on-disk cached threads to show.
@@ -1327,10 +1356,21 @@ export default function PairScreen() {
       {(status.kind === 'sessions-ready'
         || status.kind === 'thread-loading'
         || status.kind === 'thread-ready'
-        || status.kind === 'thread-error') && (
+        || status.kind === 'thread-error'
+        || showCachedSidebar) && (
         <SidebarDrawer
           visible={sidebarOpen}
-          threads={status.threads}
+          // Use the live thread list when we have it; otherwise fall back to
+          // the on-disk cache so the drawer is browsable while the bridge
+          // handshake is still in flight.
+          threads={
+            status.kind === 'sessions-ready'
+              || status.kind === 'thread-loading'
+              || status.kind === 'thread-ready'
+              || status.kind === 'thread-error'
+              ? status.threads
+              : (cachedThreads ?? [])
+          }
           activeThreadId={
             status.kind === 'thread-loading' || status.kind === 'thread-ready' || status.kind === 'thread-error'
               ? status.thread.id
