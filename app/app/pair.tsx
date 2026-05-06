@@ -1393,9 +1393,11 @@ function WelcomeView({
       </Pressable>
 
       <View style={styles.welcomeCenter}>
-        <View style={styles.welcomeIconBubble}>
-          <Icon name="checkmark" size={36} color={colors.bg} />
-        </View>
+        <Image
+          source={require('@/assets/images/codex-color.png')}
+          style={styles.welcomeLogo}
+          resizeMode="contain"
+        />
         <Text style={styles.welcomeTitle}>{titleLabel}</Text>
         <Text style={styles.welcomeSub}>{subtitle}</Text>
         <Text style={styles.welcomeCount}>
@@ -3788,6 +3790,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#9be39a',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  welcomeLogo: {
+    width: 96,
+    height: 96,
   },
   welcomeTitle: {
     color: colors.fg,
