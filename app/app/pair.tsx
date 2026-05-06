@@ -465,7 +465,7 @@ export default function PairScreen() {
         approvalCommand: pickString(p.command, p.shellCommand, p.path),
         approvalReason: pickString(p.reason, p.justification, p.summary),
       };
-      return { ...prev, turns: [approval, ...prev.turns] };
+      return { ...prev, turns: [...prev.turns, approval] };
     });
   }
 
@@ -517,9 +517,11 @@ export default function PairScreen() {
             text: finalText,
             raw: p,
           };
+          // New turns append to the END of the array so chronological order is
+          // preserved (oldest at top, newest at bottom — matches iOS Codex).
           return {
             ...prev,
-            turns: [newTurn, ...prev.turns],
+            turns: [...prev.turns, newTurn],
             streamingText: '',
           };
         }
@@ -537,7 +539,7 @@ export default function PairScreen() {
           };
           return {
             ...prev,
-            turns: [errTurn, ...prev.turns],
+            turns: [...prev.turns, errTurn],
             activeTurnId: null,
             streamingText: '',
             isSending: false,
@@ -566,7 +568,7 @@ export default function PairScreen() {
     };
     setStatus({
       ...cur,
-      turns: [optimisticUser, ...cur.turns],
+      turns: [...cur.turns, optimisticUser],
       composer: '',
       isSending: true,
       streamingText: '',
@@ -589,7 +591,7 @@ export default function PairScreen() {
         };
         return {
           ...prev,
-          turns: [errTurn, ...prev.turns],
+          turns: [...prev.turns, errTurn],
           isSending: false,
         };
       });
@@ -747,20 +749,20 @@ export default function PairScreen() {
               <FlatList
                 data={status.turns}
                 keyExtractor={(t, i) => t.id || `turn-${i}`}
-                inverted
                 ListEmptyComponent={
                   <View style={styles.empty}>
                     <Text style={styles.body50}>This thread has no turns yet.</Text>
                   </View>
                 }
-                ListHeaderComponent={
+                ListFooterComponent={
                   status.streamingText ? (
-                    <View style={[styles.turnRow, styles.turnRowStreaming]}>
-                      <Text style={styles.turnRoleLabel}>assistant</Text>
-                      <Text style={styles.turnText}>
-                        {status.streamingText}
-                        <Text style={{ color: colors.fg45 }}>▍</Text>
-                      </Text>
+                    <View style={[styles.bubbleRow, styles.bubbleRowLeft]}>
+                      <View style={[styles.bubble, styles.bubbleAssistant]}>
+                        <Text style={styles.bubbleText}>
+                          {status.streamingText}
+                          <Text style={{ color: colors.fg45 }}>▍</Text>
+                        </Text>
+                      </View>
                     </View>
                   ) : null
                 }

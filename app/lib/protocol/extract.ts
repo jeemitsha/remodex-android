@@ -97,8 +97,12 @@ function extractBranch(gitInfo: unknown): string | undefined {
 
 export function extractTurns(result: unknown): TurnRow[] {
   const list = pickArray(result, ['data', 'items', 'turns']);
+  // The bridge returns thread/turns/list with sortDirection=desc — newest turn
+  // first. For a chat UI we want chronological top-to-bottom, so reverse the
+  // outer turn order. Items inside each turn are already chronological.
+  const ordered = list.slice().reverse();
   const rows: TurnRow[] = [];
-  for (const t of list) {
+  for (const t of ordered) {
     if (!isRecord(t)) continue;
     const turnId = pickString(t.id, t.turnId) || `turn-${rows.length}`;
     const items = Array.isArray(t.items) ? t.items : [];
@@ -177,14 +181,32 @@ function itemToTurnRow(turnId: string, index: number, item: Record<string, unkno
     case 'tool_call':
     case 'mcpToolCall':
     case 'mcp_tool_call': {
-      const command = pickString(item.name, item.tool, item.toolName) || '(tool call)';
+      const server = pickString(item.server);
+      const tool = pickString(item.tool, item.toolName, item.name);
+      const command = server && tool ? `${server}.${tool}` : tool || server || '(tool call)';
       const status = pickString(item.status);
-      const output = pickString(item.aggregatedOutput, item.output, item.text);
+      const args = isRecord(item.arguments) ? item.arguments : null;
+      const argsText = args ? JSON.stringify(args, null, 2) : '';
+      let output = '';
+      if (typeof item.result === 'string') output = item.result;
+      else if (item.result !== null && item.result !== undefined) {
+        try {
+          output = JSON.stringify(item.result, null, 2);
+        } catch {
+          output = String(item.result);
+        }
+      }
+      if (item.error) {
+        const err = typeof item.error === 'string' ? item.error : JSON.stringify(item.error);
+        output = output ? `${output}\n\n[error] ${err}` : `[error] ${err}`;
+      }
+      const durationMs = typeof item.durationMs === 'number' ? item.durationMs : undefined;
       return {
         ...mkRow(itemId, 'tool', command, item),
         command,
         toolStatus: status,
-        output,
+        output: output || argsText,
+        durationMs,
       };
     }
 

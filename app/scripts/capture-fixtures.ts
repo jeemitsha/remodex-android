@@ -196,15 +196,31 @@ async function main() {
   const sampleThread = threadsArr.find((t) => typeof t === 'object' && (t.id || t.threadId));
   const threadId: string | undefined = sampleThread?.id ?? sampleThread?.threadId;
 
-  if (threadId) {
-    console.log(`→ thread/turns/list threadId=${shorten(threadId)}`);
+  // Optional: capture a specific session via REMODEX_CAPTURE_THREAD_IDS=<id1>,<id2>
+  // The first match becomes the canonical thread-turns-list.response.json so
+  // existing tests keep working; additional ones are written as
+  // thread-turns-list.<shortid>.response.json.
+  const explicit = (process.env.REMODEX_CAPTURE_THREAD_IDS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const targetIds = explicit.length > 0 ? explicit : threadId ? [threadId] : [];
+
+  for (let i = 0; i < targetIds.length; i++) {
+    const tid = targetIds[i];
+    console.log(`→ thread/turns/list threadId=${shorten(tid)} (limit=200)`);
     const turns = await rpc('thread/turns/list', {
-      threadId,
-      limit: 5,
+      threadId: tid,
+      limit: 200, // big enough for most real sessions
       sortDirection: 'desc',
     });
-    await dump('thread-turns-list.response.json', turns);
-  } else {
+    const filename = i === 0
+      ? 'thread-turns-list.response.json'
+      : `thread-turns-list.${tid.slice(0, 8)}.response.json`;
+    await dump(filename, turns);
+  }
+  if (targetIds.length === 0) {
     console.log('  (no threads to dump turns for; skipping thread/turns/list capture)');
   }
 
